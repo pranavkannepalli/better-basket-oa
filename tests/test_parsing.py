@@ -16,6 +16,19 @@ def test_load_catalog_csv_preserves_strings_and_empty_cells(tmp_path):
     assert all(isinstance(value, str) for value in df.to_numpy().ravel())
 
 
+def test_load_catalog_csv_preserves_literal_na_tokens(tmp_path):
+    path = tmp_path / "catalog.csv"
+    path.write_text("item_id,name,price\n1,NA,\n2,N/A,NULL\n3,nan,\n")
+
+    df = load_catalog_csv(path)
+
+    assert df.to_dict("records") == [
+        {"item_id": "1", "name": "NA", "price": ""},
+        {"item_id": "2", "name": "N/A", "price": "NULL"},
+        {"item_id": "3", "name": "nan", "price": ""},
+    ]
+
+
 def test_product_record_defaults():
     product = ProductRecord(item_id="1", name="Tomato Sauce")
     assert product.brand_norm == ""
