@@ -32,3 +32,20 @@ def test_dataframe_to_products_builds_product_record():
     assert products[0].brand_norm == "wegmans"
     assert products[0].category_path == ["Grocery", "Salad Dressing"]
     assert products[0].size_value == 16.0
+
+
+def test_dataframe_to_products_extracts_attributes():
+    rows = [
+        {
+            "item_id": "11",
+            "name": "Great Value Organic Tomato Sauce 8 oz",
+            "brand_raw": "Great Value",
+            "description": "Organic tomato sauce. Frozen not included.",
+            "item_info": '{"category_0":"Grocery","category_1":"Canned Goods","category_2":"Tomato Sauce"}',
+            "sizing_comp": '{"size_user_friendly":"8 oz"}',
+            "tags": "['organic']",
+        }
+    ]
+    product = dataframe_to_products(rows)[0]
+    assert "organic" in product.attribute_flags
+    assert "tomato" in product.tokens_core
