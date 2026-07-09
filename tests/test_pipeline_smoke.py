@@ -1,4 +1,8 @@
+from pathlib import Path
+
 from matcher.pipeline import run_pipeline
+from matcher.io import write_matches_csv
+from matcher.schemas import MatchDecision
 
 
 def test_run_pipeline_returns_one_match_per_input_row(tmp_path):
@@ -45,3 +49,20 @@ def test_run_pipeline_returns_one_match_per_input_row(tmp_path):
     matches = run_pipeline(rows_a, rows_b, llm_enabled=False)
     assert len(matches) == 2
     assert {match.item_id_a for match in matches} == {"a1", "a2"}
+
+
+def test_write_matches_csv_outputs_expected_columns(tmp_path: Path):
+    path = tmp_path / "matches.csv"
+    decisions = [
+        MatchDecision(
+            item_id_a="a1",
+            item_id_b="b1",
+            confidence=0.92,
+            match_quality="high",
+            decision_source="llm",
+            review_flag=False,
+        )
+    ]
+    write_matches_csv(path, decisions)
+    content = path.read_text()
+    assert "item_id_a,item_id_b,confidence,match_quality,decision_source,review_flag" in content

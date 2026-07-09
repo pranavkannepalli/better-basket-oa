@@ -1,6 +1,10 @@
+import csv
 from os import PathLike
+from pathlib import Path
 
 import pandas as pd
+
+from matcher.schemas import MatchDecision
 
 from matcher.normalize import (
     extract_attribute_flags,
@@ -15,6 +19,24 @@ from matcher.schemas import ProductRecord
 
 def load_catalog_csv(path: str | PathLike[str]) -> pd.DataFrame:
     return pd.read_csv(path, dtype=str, keep_default_na=False, na_filter=False)
+
+
+def write_matches_csv(path: Path, decisions: list[MatchDecision]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "item_id_a",
+                "item_id_b",
+                "confidence",
+                "match_quality",
+                "decision_source",
+                "review_flag",
+            ],
+        )
+        writer.writeheader()
+        for decision in decisions:
+            writer.writerow(decision.model_dump())
 
 
 def dataframe_to_products(rows: list[dict[str, str]]) -> list[ProductRecord]:
