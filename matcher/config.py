@@ -11,3 +11,5 @@ class Settings(BaseModel):
     llm_model: str = "gpt-5-nano"
     retrieval_k: int = 200
     llm_top_n: int = 24
+    high_quality_threshold: float = 0.85
+    medium_quality_threshold: float = 0.55

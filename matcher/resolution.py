@@ -1,14 +1,22 @@
 from matcher.schemas import MatchDecision
+from matcher.config import Settings
 
 
-def choose_best_match(candidates):
+_settings = Settings()
+
+
+def choose_best_match(
+    candidates,
+    high_quality_threshold: float = _settings.high_quality_threshold,
+    medium_quality_threshold: float = _settings.medium_quality_threshold,
+):
     best = sorted(candidates, key=lambda item: item.combined_score or 0.0, reverse=True)[0]
     confidence = best.combined_score or 0.0
-    if confidence >= 0.85:
+    if confidence >= high_quality_threshold:
         match_quality = "high"
         decision_source = "llm" if best.llm_score is not None else "rules"
         review_flag = False
-    elif confidence >= 0.55:
+    elif confidence >= medium_quality_threshold:
         match_quality = "medium"
         decision_source = "llm" if best.llm_score is not None else "rules"
         review_flag = False
