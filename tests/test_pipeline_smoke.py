@@ -1,7 +1,9 @@
-from importlib.util import find_spec
+import matcher
+import rapidfuzz
+import sklearn
 
 
 def test_required_packages_are_importable():
-    assert find_spec("matcher") is not None
-    assert find_spec("rapidfuzz") is not None
-    assert find_spec("sklearn") is not None
+    assert matcher.__version__ == "0.1.0"
+    assert rapidfuzz.__version__
+    assert sklearn.__version__
