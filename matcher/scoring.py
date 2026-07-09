@@ -1,6 +1,10 @@
 from matcher.schemas import CandidateScore
 
 
+def blend_scores(deterministic_score: float, llm_confidence: float, substitute_match_score: float) -> float:
+    return (0.3 * deterministic_score) + (0.4 * llm_confidence) + (0.3 * substitute_match_score)
+
+
 def score_candidate_pair(item_a, item_b) -> CandidateScore:
     token_a = set(item_a.tokens_core)
     token_b = set(item_b.tokens_core)

@@ -35,3 +35,14 @@ def build_pair_prompt(item_a, item_b) -> str:
 
 def build_openai_client() -> OpenAI:
     return OpenAI()
+
+
+def parse_llm_response(raw: str) -> dict:
+    data = json.loads(raw)
+    return {
+        "exact_match_score": float(data["exact_match_score"]),
+        "substitute_match_score": float(data["substitute_match_score"]),
+        "confidence": float(data["confidence"]),
+        "reason_codes": list(data.get("reason_codes", [])),
+        "contradictions": list(data.get("contradictions", [])),
+    }
