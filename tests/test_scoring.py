@@ -4,6 +4,8 @@ from matcher.scoring import blend_scores
 from matcher.scoring import score_candidate_pair
 from matcher.llm import build_pair_prompt
 from matcher.llm import parse_llm_response
+from matcher.llm import score_pair_with_llm_cached
+from matcher.persistence import open_cache
 from matcher.schemas import ProductRecord
 
 
@@ -62,3 +64,24 @@ def test_parse_llm_response_reads_confidence():
 def test_blend_scores_uses_weighted_average():
     blended = blend_scores(0.5, 0.8, 0.9)
     assert blended == pytest.approx(0.74)
+
+
+def test_cache_round_trip(tmp_path):
+    cache = open_cache(str(tmp_path / "cache"))
+    cache["pair:a1:b1"] = {"confidence": 0.8}
+    assert cache["pair:a1:b1"]["confidence"] == 0.8
+
+
+def test_score_pair_with_llm_cached_returns_cached_result(tmp_path, monkeypatch):
+    item_a = ProductRecord(item_id="a1", name="Item A")
+    item_b = ProductRecord(item_id="b1", name="Item B")
+    cache = open_cache(str(tmp_path / "cache"))
+    cache["pair:a1:b1"] = {"confidence": 0.8}
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("LLM call should not run on cache hit")
+
+    monkeypatch.setattr("matcher.llm.score_pair_with_llm", fail_if_called)
+
+    result = score_pair_with_llm_cached(None, cache, "model", item_a, item_b)
+    assert result["confidence"] == 0.8

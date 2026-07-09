@@ -1,6 +1,9 @@
 import json
 
 from openai import OpenAI
+from tenacity import retry
+from tenacity import stop_after_attempt
+from tenacity import wait_exponential
 
 
 SYSTEM_PROMPT = """You are a retail product matcher.
@@ -46,6 +49,20 @@ def score_pair_with_llm(client, model: str, item_a, item_b) -> dict:
         ],
     )
     return parse_llm_response(response.output_text)
+
+
+def pair_cache_key(item_a, item_b) -> str:
+    return f"pair:{item_a.item_id}:{item_b.item_id}"
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+def score_pair_with_llm_cached(client, cache, model: str, item_a, item_b) -> dict:
+    key = pair_cache_key(item_a, item_b)
+    if key in cache:
+        return cache[key]
+    result = score_pair_with_llm(client, model, item_a, item_b)
+    cache[key] = result
+    return result
 
 
 def parse_llm_response(raw: str) -> dict:
