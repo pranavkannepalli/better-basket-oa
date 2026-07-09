@@ -37,6 +37,17 @@ def build_openai_client() -> OpenAI:
     return OpenAI()
 
 
+def score_pair_with_llm(client, model: str, item_a, item_b) -> dict:
+    response = client.responses.create(
+        model=model,
+        input=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": build_pair_prompt(item_a, item_b)},
+        ],
+    )
+    return parse_llm_response(response.output_text)
+
+
 def parse_llm_response(raw: str) -> dict:
     data = json.loads(raw)
     return {
