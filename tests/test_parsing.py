@@ -26,6 +26,11 @@ def test_parse_item_info_extracts_category_path():
     assert parse_item_info(raw) == ["Grocery", "Sauces", "Tomato Sauce"]
 
 
+def test_parse_item_info_orders_category_keys_numerically():
+    raw = '{"category_2":"Sauces","category_10":"Tomato Sauce","category_1":"Grocery"}'
+    assert parse_item_info(raw) == ["Grocery", "Sauces", "Tomato Sauce"]
+
+
 def test_parse_item_info_returns_empty_list_for_non_object_json():
     assert parse_item_info('["Grocery", "Sauces"]') == []
 
