@@ -56,3 +56,13 @@ def test_parse_sizing_comp_returns_empty_dict_for_invalid_json():
 
 def test_parse_sizing_comp_returns_empty_dict_for_non_object_json():
     assert parse_sizing_comp('["size_user_friendly", "16 fl. oz."]') == {}
+
+
+def test_parsers_return_fallbacks_for_none():
+    assert parse_item_info(None) == []
+    assert parse_sizing_comp(None) == {}
+
+
+def test_parsers_return_fallbacks_for_truthy_non_string_input():
+    assert parse_item_info(1) == []
+    assert parse_sizing_comp(1) == {}
