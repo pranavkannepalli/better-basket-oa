@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from matcher.io import load_catalog_csv, write_matches_csv
-from matcher.pipeline import run_pipeline
+from matcher.pipeline import run_pipeline, summarize_decisions
 
 
 def main() -> int:
@@ -14,5 +14,9 @@ def main() -> int:
     output_dir = Path("artifacts")
     output_dir.mkdir(parents=True, exist_ok=True)
     write_matches_csv(output_dir / "matches.csv", decisions)
-    print(f"matches={len(decisions)}")
+    print(summarize_decisions(decisions))
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

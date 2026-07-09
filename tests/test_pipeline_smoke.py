@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from matcher.persistence import append_match_log
-from matcher.pipeline import run_pipeline
+from matcher.pipeline import run_pipeline, summarize_decisions
 from matcher.io import write_matches_csv
 from matcher.schemas import MatchDecision
 
@@ -74,3 +74,28 @@ def test_append_match_log_writes_jsonl(tmp_path: Path):
     append_match_log(path, {"item_id_a": "a1", "item_id_b": "b1", "combined_score": 0.91})
     content = path.read_text().strip()
     assert '"item_id_a":"a1"' in content
+
+
+def test_summarize_decisions_counts_quality_bands():
+    decisions = [
+        MatchDecision(
+            item_id_a="a1",
+            item_id_b="b1",
+            confidence=0.91,
+            match_quality="high",
+            decision_source="llm",
+            review_flag=False,
+        ),
+        MatchDecision(
+            item_id_a="a2",
+            item_id_b="b2",
+            confidence=0.42,
+            match_quality="low",
+            decision_source="fallback",
+            review_flag=True,
+        ),
+    ]
+    summary = summarize_decisions(decisions)
+    assert summary["total_matches"] == 2
+    assert summary["by_quality"]["high"] == 1
+    assert summary["by_quality"]["low"] == 1

@@ -1,3 +1,4 @@
+from collections import Counter
 from pathlib import Path
 
 from matcher.llm import build_openai_client, score_pair_with_llm
@@ -48,3 +49,13 @@ def run_pipeline(rows_a, rows_b, llm_enabled: bool = False, output_dir: str = "a
         decisions.append(decision)
 
     return decisions
+
+
+def summarize_decisions(decisions):
+    quality_counts = Counter(decision.match_quality for decision in decisions)
+    source_counts = Counter(decision.decision_source for decision in decisions)
+    return {
+        "total_matches": len(decisions),
+        "by_quality": dict(quality_counts),
+        "by_source": dict(source_counts),
+    }
