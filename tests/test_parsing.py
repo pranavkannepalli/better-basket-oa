@@ -26,6 +26,10 @@ def test_parse_item_info_extracts_category_path():
     assert parse_item_info(raw) == ["Grocery", "Sauces", "Tomato Sauce"]
 
 
+def test_parse_item_info_returns_empty_list_for_non_object_json():
+    assert parse_item_info('["Grocery", "Sauces"]') == []
+
+
 def test_parse_sizing_comp_extracts_user_friendly_size():
     raw = '{"size_user_friendly":"16 fl. oz.","billed_by_weight":false}'
     parsed = parse_sizing_comp(raw)

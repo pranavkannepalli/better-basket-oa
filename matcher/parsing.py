@@ -12,6 +12,8 @@ def _safe_json_loads(raw: str):
 
 def parse_item_info(raw: str) -> list[str]:
     data = _safe_json_loads(raw)
+    if not isinstance(data, dict):
+        return []
     return [
         value
         for key, value in sorted(data.items())
