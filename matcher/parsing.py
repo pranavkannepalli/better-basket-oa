@@ -25,7 +25,7 @@ def parse_item_info(raw: str) -> list[str]:
     return [
         value
         for key, value in sorted(data.items(), key=_category_sort_key)
-        if key.startswith("category_") and value
+        if key.startswith("category_") and isinstance(value, str) and value
     ]
 
 

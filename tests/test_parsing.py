@@ -35,7 +35,24 @@ def test_parse_item_info_returns_empty_list_for_non_object_json():
     assert parse_item_info('["Grocery", "Sauces"]') == []
 
 
+def test_parse_item_info_filters_non_string_category_values():
+    raw = '{"category_0":"Grocery","category_1":2,"category_2":false,"category_3":"Sauces"}'
+    assert parse_item_info(raw) == ["Grocery", "Sauces"]
+
+
+def test_parse_item_info_returns_empty_list_for_invalid_json():
+    assert parse_item_info("{not json}") == []
+
+
 def test_parse_sizing_comp_extracts_user_friendly_size():
     raw = '{"size_user_friendly":"16 fl. oz.","billed_by_weight":false}'
     parsed = parse_sizing_comp(raw)
     assert parsed["size_user_friendly"] == "16 fl. oz."
+
+
+def test_parse_sizing_comp_returns_empty_dict_for_invalid_json():
+    assert parse_sizing_comp("{not json}") == {}
+
+
+def test_parse_sizing_comp_returns_empty_dict_for_non_object_json():
+    assert parse_sizing_comp('["size_user_friendly", "16 fl. oz."]') == {}
