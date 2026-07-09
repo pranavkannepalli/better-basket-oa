@@ -1,5 +1,19 @@
+from matcher.io import load_catalog_csv
 from matcher.parsing import parse_item_info, parse_sizing_comp
 from matcher.schemas import MatchDecision, ProductRecord
+
+
+def test_load_catalog_csv_preserves_strings_and_empty_cells(tmp_path):
+    path = tmp_path / "catalog.csv"
+    path.write_text("item_id,name,price\n1,Tomato Sauce,\n2,,3.99\n")
+
+    df = load_catalog_csv(path)
+
+    assert df.to_dict("records") == [
+        {"item_id": "1", "name": "Tomato Sauce", "price": ""},
+        {"item_id": "2", "name": "", "price": "3.99"},
+    ]
+    assert all(isinstance(value, str) for value in df.to_numpy().ravel())
 
 
 def test_product_record_defaults():

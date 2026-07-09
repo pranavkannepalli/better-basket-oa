@@ -1,7 +1,7 @@
 import json
 
 
-def _safe_json_loads(raw: str):
+def _safe_json_loads(raw: object):
     if not raw:
         return {}
     try:
@@ -18,7 +18,7 @@ def _category_sort_key(item: tuple[str, str]) -> tuple[int, int | str]:
     return (1, suffix)
 
 
-def parse_item_info(raw: str) -> list[str]:
+def parse_item_info(raw: object) -> list[str]:
     data = _safe_json_loads(raw)
     if not isinstance(data, dict):
         return []
@@ -29,6 +29,6 @@ def parse_item_info(raw: str) -> list[str]:
     ]
 
 
-def parse_sizing_comp(raw: str) -> dict:
+def parse_sizing_comp(raw: object) -> dict:
     data = _safe_json_loads(raw)
     return data if isinstance(data, dict) else {}
