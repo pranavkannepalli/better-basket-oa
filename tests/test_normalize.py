@@ -1,5 +1,6 @@
 from matcher.io import dataframe_to_products
 from matcher.normalize import extract_size, normalize_brand, normalize_name
+from matcher.schemas import ProductRecord
 
 
 def test_normalize_brand_lowercases_and_trims():
@@ -27,6 +28,7 @@ def test_dataframe_to_products_builds_product_record():
         }
     ]
     products = dataframe_to_products(rows)
+    assert isinstance(products[0], ProductRecord)
     assert products[0].brand_norm == "wegmans"
     assert products[0].category_path == ["Grocery", "Salad Dressing"]
     assert products[0].size_value == 16.0
