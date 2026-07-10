@@ -1,6 +1,7 @@
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 import gc
+import hashlib
 import multiprocessing
 import os
 import platform
@@ -50,6 +51,45 @@ def _format_duration(seconds: float) -> str:
     if minutes:
         return f"{minutes}m {seconds}s"
     return f"{seconds}s"
+
+
+def _current_rss_mb() -> float | None:
+    status_path = Path("/proc/self/status")
+    if not status_path.exists():
+        return None
+    for line in status_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("VmRSS:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                return int(parts[1]) / 1024
+    return None
+
+
+def _item_ids_digest(item_ids: list[str]) -> str:
+    digest = hashlib.sha256()
+    for item_id in item_ids:
+        digest.update(item_id.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _checkpoint_matches(checkpoint: dict, item_ids: list[str], item_ids_digest: str) -> bool:
+    if checkpoint.get("item_ids_a") == item_ids:
+        return True
+    return checkpoint.get("item_count") == len(item_ids) and checkpoint.get("item_ids_digest") == item_ids_digest
+
+
+def _checkpoint_payload(item_ids: list[str], item_ids_digest: str, decisions: list[MatchDecision | None]) -> dict:
+    return {
+        "version": 2,
+        "item_count": len(item_ids),
+        "item_ids_digest": item_ids_digest,
+        "decisions_by_position": {
+            str(position): decision.model_dump()
+            for position, decision in enumerate(decisions)
+            if decision is not None
+        },
+    }
 
 
 def _resolve_process_start_method(requested: str) -> str:
@@ -351,12 +391,19 @@ def run_pipeline(
     checkpoint_path = Path(output_dir) / "pipeline-checkpoint.json"
     checkpoint = load_checkpoint(checkpoint_path)
     item_ids_a = [item.item_id for item in products_a]
+    item_ids_a_digest = _item_ids_digest(item_ids_a)
     decisions = [None] * len(products_a)
-    if checkpoint and checkpoint.get("item_ids_a") == item_ids_a:
-        saved_decisions = checkpoint.get("decisions", [])
-        for position, saved_decision in enumerate(saved_decisions[: len(decisions)]):
-            if saved_decision is not None:
-                decisions[position] = MatchDecision.model_validate(saved_decision)
+    if checkpoint and _checkpoint_matches(checkpoint, item_ids_a, item_ids_a_digest):
+        if "decisions_by_position" in checkpoint:
+            for position_text, saved_decision in checkpoint.get("decisions_by_position", {}).items():
+                position = int(position_text)
+                if 0 <= position < len(decisions):
+                    decisions[position] = MatchDecision.model_validate(saved_decision)
+        else:
+            saved_decisions = checkpoint.get("decisions", [])
+            for position, saved_decision in enumerate(saved_decisions[: len(decisions)]):
+                if saved_decision is not None:
+                    decisions[position] = MatchDecision.model_validate(saved_decision)
         restored_count = sum(decision is not None for decision in decisions)
         print(f"Resumed {restored_count}/{len(decisions)} decisions from {checkpoint_path}")
     elif checkpoint:
@@ -370,6 +417,7 @@ def run_pipeline(
     progress_start_completed = completed
     scoring_worker_ids = set()
     scoring_worker_lock = threading.Lock()
+    pending_llm_finishes = set()
     use_process_pool = False
     resolved_process_start_method = None
 
@@ -384,13 +432,7 @@ def run_pipeline(
                 scoring_worker_ids.add(worker_id)
         process_worker_cpu_seconds += worker_cpu_seconds
         if completed >= next_progress_log:
-            save_checkpoint(
-                checkpoint_path,
-                {
-                    "item_ids_a": item_ids_a,
-                    "decisions": [decision.model_dump() if decision is not None else None for decision in decisions],
-                },
-            )
+            save_checkpoint(checkpoint_path, _checkpoint_payload(item_ids_a, item_ids_a_digest, decisions))
             if progress_callback is not None:
                 progress_callback(decisions, products_a_by_id, products_b_by_id)
             elapsed = time.perf_counter() - progress_started
@@ -405,12 +447,15 @@ def run_pipeline(
             effective_cores = cpu_elapsed / elapsed if elapsed > 0 else 0.0
             remaining = len(decisions) - completed
             eta = remaining / rate if rate > 0 else 0.0
+            rss_mb = _current_rss_mb()
+            rss_text = f", parent RSS={rss_mb:.0f} MB" if rss_mb is not None else ""
             print(
                 f"Progress: {completed}/{len(decisions)} decisions complete "
                 f"({rate:.2f}/s, elapsed {_format_duration(elapsed)}, "
                 f"ETA {_format_duration(eta)}, CPU {_format_duration(cpu_elapsed)}, "
                 f"effective cores={effective_cores:.1f}, workers configured={max_workers}, "
-                f"workers observed={len(scoring_worker_ids)}); checkpoint saved to {checkpoint_path}"
+                f"workers observed={len(scoring_worker_ids)}, pending LLM={len(pending_llm_finishes)}"
+                f"{rss_text}); checkpoint saved to {checkpoint_path}"
             )
             next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
 
@@ -551,7 +596,7 @@ def run_pipeline(
                 return _fallback_decision(item_a, products_b)
 
         llm_finish_executor = None
-        pending_llm_finishes = []
+        llm_backlog_limit = max(max_workers * 4, max_workers + 1)
 
         def record_worker_activity(worker_id, worker_cpu_seconds) -> None:
             nonlocal process_worker_cpu_seconds
@@ -579,22 +624,32 @@ def run_pipeline(
                 position, decision = finish_llm_item(position, item_a, scored, candidates_by_id)
                 record_progress(position, decision)
                 return
-            pending_llm_finishes.append(
+            pending_llm_finishes.add(
                 llm_finish_executor.submit(finish_llm_item, position, item_a, scored, candidates_by_id)
             )
+            drain_llm_finishes(wait_for_capacity=True)
 
-        def drain_llm_finishes(block: bool = False) -> None:
+        def drain_llm_finishes(block: bool = False, wait_for_capacity: bool = False) -> None:
             if not pending_llm_finishes:
                 return
             if block:
-                for future in as_completed(pending_llm_finishes):
+                for future in as_completed(tuple(pending_llm_finishes)):
                     position, decision = future.result()
                     record_progress(position, decision)
                 pending_llm_finishes.clear()
                 return
-            completed_futures = [future for future in pending_llm_finishes if future.done()]
+
+            if wait_for_capacity:
+                while len(pending_llm_finishes) >= llm_backlog_limit:
+                    completed_futures, _ = wait(pending_llm_finishes, return_when=FIRST_COMPLETED)
+                    pending_llm_finishes.difference_update(completed_futures)
+                    for future in completed_futures:
+                        position, decision = future.result()
+                        record_progress(position, decision)
+
+            completed_futures = {future for future in pending_llm_finishes if future.done()}
+            pending_llm_finishes.difference_update(completed_futures)
             for future in completed_futures:
-                pending_llm_finishes.remove(future)
                 position, decision = future.result()
                 record_progress(position, decision)
 
@@ -720,11 +775,7 @@ def run_pipeline(
                 process_batch(unmatched[start : start + batch_size])
 
     save_checkpoint(
-        checkpoint_path,
-        {
-            "item_ids_a": item_ids_a,
-            "decisions": [decision.model_dump() if decision is not None else None for decision in decisions],
-        },
+        checkpoint_path, _checkpoint_payload(item_ids_a, item_ids_a_digest, decisions)
     )
     if progress_callback is not None:
         progress_callback(decisions, products_a_by_id, products_b_by_id)

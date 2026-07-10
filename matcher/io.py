@@ -154,10 +154,56 @@ def write_matches_csv(
             writer.writerow(row)
 
 
+def append_matches_csv(
+    path: Path,
+    decisions,
+    products_a_by_id: dict[str, ProductRecord] | None = None,
+    products_b_by_id: dict[str, ProductRecord] | None = None,
+) -> None:
+    decision_fields = [
+        "item_id_a",
+        "item_id_b",
+        "confidence",
+        "match_quality",
+        "decision_source",
+        "review_flag",
+    ]
+    detail_fields = []
+    if products_a_by_id is not None and products_b_by_id is not None:
+        detail_fields = [f"a_{field}" for field in PRODUCT_DETAIL_FIELDS]
+        detail_fields += [f"b_{field}" for field in PRODUCT_DETAIL_FIELDS]
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    needs_header = not path.exists() or path.stat().st_size == 0
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=decision_fields + detail_fields)
+        if needs_header:
+            writer.writeheader()
+        for decision in decisions:
+            row = _decision_row(decision)
+            if products_a_by_id is not None and products_b_by_id is not None:
+                row.update(_product_detail_row("a", products_a_by_id.get(decision.item_id_a)))
+                row.update(_product_detail_row("b", products_b_by_id.get(decision.item_id_b)))
+            writer.writerow(row)
+
+
 def write_submission_csv(path: Path, decisions: list[MatchDecision], min_confidence: float = 0.4) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=["item_id_A", "item_id_B"])
         writer.writeheader()
+        for decision in decisions:
+            if decision.confidence < min_confidence:
+                continue
+            writer.writerow({"item_id_A": decision.item_id_a, "item_id_B": decision.item_id_b})
+
+
+def append_submission_csv(path: Path, decisions, min_confidence: float = 0.4) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    needs_header = not path.exists() or path.stat().st_size == 0
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["item_id_A", "item_id_B"])
+        if needs_header:
+            writer.writeheader()
         for decision in decisions:
             if decision.confidence < min_confidence:
                 continue
@@ -173,6 +219,21 @@ def write_detailed_submission_csv(
 ) -> None:
     filtered_decisions = [decision for decision in decisions if decision.confidence >= min_confidence]
     write_matches_csv(path, filtered_decisions, products_a_by_id, products_b_by_id)
+
+
+def append_detailed_submission_csv(
+    path: Path,
+    decisions,
+    products_a_by_id: dict[str, ProductRecord],
+    products_b_by_id: dict[str, ProductRecord],
+    min_confidence: float = 0.4,
+) -> None:
+    append_matches_csv(
+        path,
+        (decision for decision in decisions if decision.confidence >= min_confidence),
+        products_a_by_id,
+        products_b_by_id,
+    )
 
 
 def dataframe_to_products(rows: list[dict[str, str]] | pd.DataFrame) -> list[ProductRecord]:
