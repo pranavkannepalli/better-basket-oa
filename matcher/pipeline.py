@@ -359,6 +359,7 @@ def run_pipeline(
     retrieval_k: int = _settings.retrieval_k,
     llm_top_n: int = _settings.llm_top_n,
     llm_min_deterministic: float = _settings.llm_min_deterministic,
+    llm_backlog_limit: int = _settings.llm_backlog_limit,
     embedding_model: str = _settings.embedding_model,
     embedding_batch_size: int = _settings.embedding_batch_size,
     max_workers: int = _settings.max_workers,
@@ -596,7 +597,9 @@ def run_pipeline(
                 return _fallback_decision(item_a, products_b)
 
         llm_finish_executor = None
-        llm_backlog_limit = max(max_workers * 4, max_workers + 1)
+        resolved_llm_backlog_limit = (
+            llm_backlog_limit if llm_backlog_limit > 0 else max(max_workers * 64, max_workers + 1)
+        )
 
         def record_worker_activity(worker_id, worker_cpu_seconds) -> None:
             nonlocal process_worker_cpu_seconds
@@ -640,7 +643,7 @@ def run_pipeline(
                 return
 
             if wait_for_capacity:
-                while len(pending_llm_finishes) >= llm_backlog_limit:
+                while len(pending_llm_finishes) >= resolved_llm_backlog_limit:
                     completed_futures, _ = wait(pending_llm_finishes, return_when=FIRST_COMPLETED)
                     pending_llm_finishes.difference_update(completed_futures)
                     for future in completed_futures:
@@ -703,7 +706,8 @@ def run_pipeline(
         print(
             f"Scoring retrieval rows: {len(unmatched)} items, "
             f"batch_size={batch_size}, workers={max_workers}, worker_mode={worker_mode}, "
-            f"process_start_method={resolved_process_start_method or 'n/a'}, llm={llm_enabled}"
+            f"process_start_method={resolved_process_start_method or 'n/a'}, llm={llm_enabled}, "
+            f"llm_backlog_limit={resolved_llm_backlog_limit if llm_enabled else 0}"
         )
         if use_process_pool and embedding_model:
             if resolved_process_start_method == "spawn":
