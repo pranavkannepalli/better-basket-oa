@@ -7,8 +7,8 @@ Benchmark setting: --max-workers 8
 Summary
 -------
 Fastest practical path:
-  TF-IDF only, no local embeddings:
-    .venv/bin/python run_matcher.py --no-embeddings --max-workers 8 --checkpoint-every 1000
+  TF-IDF only, no local embeddings, process workers:
+    .venv/bin/python run_matcher.py --no-embeddings --worker-mode process --max-workers 8 --checkpoint-every 1000
 
 Default higher-recall path:
   TF-IDF + local embeddings + FAISS CPU:
@@ -21,6 +21,32 @@ sample, 87/1000 rows hit medium/high rules, so full run estimate is about
 
 Benchmarks
 ----------
+0. TF-IDF only, no LLM, no local embeddings, process workers
+
+Command:
+  .venv/bin/python run_matcher.py \
+    --limit-a 1000 \
+    --no-llm \
+    --no-embeddings \
+    --worker-mode process \
+    --max-workers 8 \
+    --checkpoint-every 500 \
+    --min-confidence 0 \
+    --output-dir /tmp/bb-process-1000
+
+Observed:
+  Total runtime: 20.6s / 1000 A rows, including startup/index/output.
+  Scoring throughput: 99.84 decisions/s at final checkpoint.
+  Effective CPU cores during scoring: 7.5
+  Workers observed: 8
+  Output quality counts: low=913, medium=82, high=5
+  Output source counts: fallback=913, rules=87
+
+Full-run estimate:
+  Scoring projection only: 233,214 / 99.84 = 38.9m
+  Practical end-to-end estimate with output/checkpoints/startup: about 45-65m.
+
+
 1. TF-IDF only, no LLM, no local embeddings
 
 Command:
@@ -128,7 +154,10 @@ Full-run estimates with LLM:
 
 Recommendation
 --------------
-Use TF-IDF only for fastest full run:
+Use TF-IDF only with process workers for fastest full run and high CPU use:
+  .venv/bin/python run_matcher.py --no-embeddings --worker-mode process --max-workers 8 --checkpoint-every 1000
+
+Use thread workers when LLM is enabled:
   .venv/bin/python run_matcher.py --no-embeddings --max-workers 8 --checkpoint-every 1000
 
 Use FAISS embeddings only if the extra recall is worth roughly doubling runtime:
@@ -149,3 +178,13 @@ cache must first build B embeddings once, then save them to .npz.
 The RTX 3070 is not materially used by the current local embedding path; fastembed
 is running through the installed CPU runtime here. The main utilization observed
 was CPU.
+
+Process worker mode
+-------------------
+--worker-mode process uses Linux fork + ProcessPoolExecutor. This is intended
+for CPU-bound deterministic scoring, especially --no-llm runs. It shares the
+already-loaded product/index memory copy-on-write and avoids the Python GIL
+limiting scoring to about 2 effective cores.
+
+If LLM is enabled, the pipeline falls back to thread workers because API clients
+and disk caches should stay in the parent process/thread pool path.

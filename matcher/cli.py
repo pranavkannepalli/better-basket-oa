@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm", dest="llm_enabled", action="store_true", default=True)
     parser.add_argument("--no-llm", dest="llm_enabled", action="store_false")
     parser.add_argument("--max-workers", type=int, default=settings.max_workers)
+    parser.add_argument("--worker-mode", choices=["thread", "process"], default="thread")
     parser.add_argument("--item-retry-attempts", type=int, default=settings.item_retry_attempts)
     parser.add_argument("--checkpoint-every", type=int, default=100)
     parser.add_argument("--retrieval-k", type=int, default=settings.retrieval_k)
@@ -117,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
                 embedding_model=args.embedding_model,
                 embedding_batch_size=args.embedding_batch_size,
                 max_workers=args.max_workers,
+                worker_mode=args.worker_mode,
                 item_retry_attempts=args.item_retry_attempts,
                 checkpoint_every=args.checkpoint_every,
                 progress_callback=progress_callback,

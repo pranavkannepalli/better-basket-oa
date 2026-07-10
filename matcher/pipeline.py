@@ -1,6 +1,7 @@
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import gc
+import multiprocessing
 import os
 from pathlib import Path
 import threading
@@ -28,6 +29,7 @@ from matcher.scoring import HARD_CONTRADICTIONS, blend_scores, deterministic_onl
 from matcher.schemas import MatchDecision, ProductRecord
 
 _settings = Settings()
+_PROCESS_WORKER_STATE = {}
 
 
 def _log_elapsed(message: str, started: float) -> None:
@@ -87,6 +89,31 @@ def _with_retries(fn, attempts: int):
         except Exception as exc:  # noqa: BLE001 - pipeline should preserve one output row per A item.
             last_exc = exc
     raise last_exc
+
+
+def _score_unmatched_item_process(payload):
+    item_a, query_embedding = payload
+    started_cpu = time.process_time()
+    try:
+        decision = _with_retries(
+            lambda: _score_unmatched_item(
+                item_a,
+                _PROCESS_WORKER_STATE["products_b"],
+                _PROCESS_WORKER_STATE["index"],
+                None,
+                None,
+                _PROCESS_WORKER_STATE["model"],
+                False,
+                _PROCESS_WORKER_STATE["retrieval_k"],
+                _PROCESS_WORKER_STATE["llm_top_n"],
+                _PROCESS_WORKER_STATE["llm_min_deterministic"],
+                query_embedding,
+            ),
+            _PROCESS_WORKER_STATE["item_retry_attempts"],
+        )
+    except Exception:  # noqa: BLE001 - preserve deliverable coverage on unexpected row failures.
+        decision = _fallback_decision(item_a, _PROCESS_WORKER_STATE["products_b"])
+    return decision, os.getpid(), time.process_time() - started_cpu
 
 
 def _score_unmatched_item(
@@ -153,6 +180,7 @@ def run_pipeline(
     embedding_model: str = _settings.embedding_model,
     embedding_batch_size: int = _settings.embedding_batch_size,
     max_workers: int = _settings.max_workers,
+    worker_mode: str = "thread",
     item_retry_attempts: int = _settings.item_retry_attempts,
     checkpoint_every: int = 100,
     progress_callback: Callable[
@@ -195,16 +223,21 @@ def run_pipeline(
     next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
     progress_started = time.perf_counter()
     progress_cpu_started = time.process_time()
+    process_worker_cpu_seconds = 0.0
     progress_start_completed = completed
-    scoring_thread_ids = set()
-    scoring_thread_lock = threading.Lock()
+    scoring_worker_ids = set()
+    scoring_worker_lock = threading.Lock()
 
-    def record_progress(position, decision) -> None:
-        nonlocal completed, next_progress_log
+    def record_progress(position, decision, worker_id=None, worker_cpu_seconds=0.0) -> None:
+        nonlocal completed, next_progress_log, process_worker_cpu_seconds
         if decisions[position] is not None:
             return
         decisions[position] = decision
         completed += 1
+        if worker_id is not None:
+            with scoring_worker_lock:
+                scoring_worker_ids.add(worker_id)
+        process_worker_cpu_seconds += worker_cpu_seconds
         if completed >= next_progress_log:
             save_checkpoint(
                 checkpoint_path,
@@ -216,7 +249,12 @@ def run_pipeline(
             if progress_callback is not None:
                 progress_callback(decisions, products_a_by_id, products_b_by_id)
             elapsed = time.perf_counter() - progress_started
-            cpu_elapsed = time.process_time() - progress_cpu_started
+            parent_cpu_elapsed = time.process_time() - progress_cpu_started
+            cpu_elapsed = (
+                process_worker_cpu_seconds + parent_cpu_elapsed
+                if worker_mode == "process"
+                else parent_cpu_elapsed
+            )
             completed_since_start = completed - progress_start_completed
             rate = completed_since_start / elapsed if elapsed > 0 else 0.0
             effective_cores = cpu_elapsed / elapsed if elapsed > 0 else 0.0
@@ -227,7 +265,7 @@ def run_pipeline(
                 f"({rate:.2f}/s, elapsed {_format_duration(elapsed)}, "
                 f"ETA {_format_duration(eta)}, CPU {_format_duration(cpu_elapsed)}, "
                 f"effective cores={effective_cores:.1f}, workers configured={max_workers}, "
-                f"workers observed={len(scoring_thread_ids)}); checkpoint saved to {checkpoint_path}"
+                f"workers observed={len(scoring_worker_ids)}); checkpoint saved to {checkpoint_path}"
             )
             next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
 
@@ -304,8 +342,6 @@ def run_pipeline(
             print("Embeddings disabled")
 
         def process(item_a, query_embedding=None):
-            with scoring_thread_lock:
-                scoring_thread_ids.add(threading.get_ident())
             try:
                 return _with_retries(
                     lambda: _score_unmatched_item(
@@ -337,33 +373,65 @@ def run_pipeline(
 
             def process_pair(item_with_embedding):
                 (_, item_a), query_embedding = item_with_embedding
-                return process(item_a, query_embedding)
+                with scoring_worker_lock:
+                    scoring_worker_ids.add(threading.get_ident())
+                return process(item_a, query_embedding), None, 0.0
 
-            pairs_with_embeddings = (
+            pairs_with_embeddings = [
                 (
                     (position, item_a),
                     batch_embeddings[offset] if batch_embeddings is not None else None,
                 )
                 for offset, (position, item_a) in enumerate(batch)
-            )
-            results = (
-                executor.map(process_pair, pairs_with_embeddings)
-                if executor
-                else map(process_pair, pairs_with_embeddings)
-            )
-            for (position, _), decision in zip(batch, results):
-                record_progress(position, decision)
+            ]
+            if worker_mode == "process" and executor is not None:
+                results = executor.map(
+                    _score_unmatched_item_process,
+                    [(item_a, query_embedding) for (_, item_a), query_embedding in pairs_with_embeddings],
+                )
+            else:
+                results = (
+                    executor.map(process_pair, pairs_with_embeddings)
+                    if executor
+                    else map(process_pair, pairs_with_embeddings)
+                )
+            for (position, _), (decision, worker_id, worker_cpu_seconds) in zip(batch, results):
+                record_progress(position, decision, worker_id, worker_cpu_seconds)
             del batch_embeddings
 
         batch_size = max(embedding_batch_size, 1)
+        if worker_mode == "process" and llm_enabled:
+            print("Process worker mode is CPU-only; falling back to thread workers because LLM is enabled")
+            worker_mode = "thread"
         print(
             f"Scoring retrieval rows: {len(unmatched)} items, "
-            f"batch_size={batch_size}, workers={max_workers}, llm={llm_enabled}"
+            f"batch_size={batch_size}, workers={max_workers}, worker_mode={worker_mode}, llm={llm_enabled}"
         )
+        progress_started = time.perf_counter()
+        progress_cpu_started = time.process_time()
+        progress_start_completed = completed
+        process_worker_cpu_seconds = 0.0
         if max_workers > 1 and len(unmatched) > 1:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                for start in range(0, len(unmatched), batch_size):
-                    process_batch(unmatched[start : start + batch_size], executor)
+            if worker_mode == "process":
+                global _PROCESS_WORKER_STATE
+                _PROCESS_WORKER_STATE = {
+                    "products_b": products_b,
+                    "index": index,
+                    "model": model,
+                    "retrieval_k": retrieval_k,
+                    "llm_top_n": llm_top_n,
+                    "llm_min_deterministic": llm_min_deterministic,
+                    "item_retry_attempts": item_retry_attempts,
+                }
+                context = multiprocessing.get_context("fork")
+                with ProcessPoolExecutor(max_workers=max_workers, mp_context=context) as executor:
+                    for start in range(0, len(unmatched), batch_size):
+                        process_batch(unmatched[start : start + batch_size], executor)
+                _PROCESS_WORKER_STATE = {}
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    for start in range(0, len(unmatched), batch_size):
+                        process_batch(unmatched[start : start + batch_size], executor)
         else:
             for start in range(0, len(unmatched), batch_size):
                 process_batch(unmatched[start : start + batch_size])
