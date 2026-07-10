@@ -1,5 +1,6 @@
 from collections import defaultdict
 import hashlib
+import os
 import pickle
 from pathlib import Path
 
@@ -11,6 +12,11 @@ from sklearn.feature_extraction.text import TfidfTransformer
 
 RETRIEVAL_INDEX_VERSION = 5
 TEXT_HASH_FEATURES = 2**20
+FAISS_ENABLED = os.environ.get("FAISS_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+FAISS_HNSW_M = int(os.environ.get("FAISS_HNSW_M", "32"))
+FAISS_EF_CONSTRUCTION = int(os.environ.get("FAISS_EF_CONSTRUCTION", "80"))
+FAISS_EF_SEARCH = int(os.environ.get("FAISS_EF_SEARCH", "64"))
+FAISS_NUM_THREADS = int(os.environ.get("FAISS_NUM_THREADS", "1"))
 
 
 def _category_overlap(a: list[str], b: list[str]) -> float:
@@ -100,14 +106,41 @@ def _normalize_matrix(matrix: np.ndarray) -> np.ndarray:
     return matrix
 
 
+def _build_faiss_index(matrix: np.ndarray):
+    if not FAISS_ENABLED:
+        return None
+    try:
+        import faiss
+    except ImportError:
+        return None
+
+    faiss.omp_set_num_threads(max(FAISS_NUM_THREADS, 1))
+    index = faiss.IndexHNSWFlat(matrix.shape[1], FAISS_HNSW_M, faiss.METRIC_INNER_PRODUCT)
+    index.hnsw.efConstruction = FAISS_EF_CONSTRUCTION
+    index.hnsw.efSearch = FAISS_EF_SEARCH
+    index.add(np.ascontiguousarray(matrix, dtype=np.float32))
+    return index
+
+
 def attach_embedding_matrix(index, embeddings: np.ndarray) -> None:
     items_b = index.get("items_b", [])
     if len(embeddings) == 0:
         index["embedding_matrix"] = None
+        index["embedding_index"] = None
+        index["embedding_backend"] = "none"
         return
     if len(embeddings) != len(items_b):
         raise ValueError("Embedding matrix must contain one row for every retrieval item")
-    index["embedding_matrix"] = _normalize_matrix(np.asarray(embeddings, dtype=np.float32))
+    matrix = _normalize_matrix(np.asarray(embeddings, dtype=np.float32))
+    faiss_index = _build_faiss_index(matrix)
+    if faiss_index is not None:
+        index["embedding_index"] = faiss_index
+        index["embedding_matrix"] = None
+        index["embedding_backend"] = "faiss_hnsw_cpu"
+    else:
+        index["embedding_index"] = None
+        index["embedding_matrix"] = matrix
+        index["embedding_backend"] = "numpy"
 
 
 def save_retrieval_index(path, index) -> None:
@@ -163,16 +196,26 @@ def _semantic_candidates(item_a, index, limit: int) -> list:
 
 
 def _embedding_candidates(query_embedding, index, limit: int) -> list:
+    faiss_index = index.get("embedding_index")
     matrix = index.get("embedding_matrix")
     items_b = index.get("items_b", [])
-    if query_embedding is None or matrix is None or not items_b:
+    if query_embedding is None or (matrix is None and faiss_index is None) or not items_b:
         return []
 
     query = np.asarray(query_embedding, dtype=np.float32)
     norm = np.linalg.norm(query)
     if norm == 0:
         return []
-    similarities = matrix @ (query / norm)
+    query = np.ascontiguousarray((query / norm).reshape(1, -1), dtype=np.float32)
+    if faiss_index is not None:
+        similarities, positions = faiss_index.search(query, min(limit, len(items_b)))
+        return [
+            items_b[int(pos)]
+            for score, pos in zip(similarities[0], positions[0])
+            if int(pos) >= 0 and score > 0
+        ]
+
+    similarities = matrix @ query.ravel()
     if len(similarities) <= limit:
         top_positions = np.argsort(similarities)[::-1]
     else:

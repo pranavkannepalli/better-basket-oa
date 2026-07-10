@@ -1,0 +1,151 @@
+Runtime benchmarks and estimates
+Date: 2026-07-10
+Machine: 12 CPU threads, 31 GiB RAM, RTX 3070 8 GiB
+Dataset: 233,214 A rows, 55,516 B rows loaded by current parser
+Benchmark setting: --max-workers 8
+
+Summary
+-------
+Fastest practical path:
+  TF-IDF only, no local embeddings:
+    .venv/bin/python run_matcher.py --no-embeddings --max-workers 8 --checkpoint-every 1000
+
+Default higher-recall path:
+  TF-IDF + local embeddings + FAISS CPU:
+    .venv/bin/python run_matcher.py --max-workers 8 --checkpoint-every 1000
+
+LLM adds time based on number of medium/high rule candidates. In the 1000-row
+sample, 87/1000 rows hit medium/high rules, so full run estimate is about
+20,290 LLM calls if distribution holds.
+
+
+Benchmarks
+----------
+1. TF-IDF only, no LLM, no local embeddings
+
+Command:
+  .venv/bin/python run_matcher.py \
+    --limit-a 1000 \
+    --no-llm \
+    --no-embeddings \
+    --max-workers 8 \
+    --checkpoint-every 1000 \
+    --min-confidence 0 \
+    --output-dir /tmp/bb-bench-tfidf
+
+Observed:
+  Total runtime: 64.0s / 1000 A rows
+  Output quality counts: low=913, medium=82, high=5
+  Output source counts: fallback=913, rules=87
+
+Full-run estimate:
+  Conservative end-to-end projection: 64.0s * 233.214 = 4.15h
+  Fixed startup is only about 10s, so actual should be closer to 3.5-4.2h.
+
+
+2. TF-IDF + FAISS CPU embeddings, no LLM
+
+Command:
+  .venv/bin/python run_matcher.py \
+    --limit-a 1000 \
+    --no-llm \
+    --max-workers 8 \
+    --checkpoint-every 1000 \
+    --min-confidence 0 \
+    --output-dir /tmp/bb-bench-faiss
+
+Setup:
+  Reused cached retrieval-index-b.pkl.
+  Reused cached B embeddings .npz.
+  Built in-memory FAISS HNSW CPU index from cached B embeddings.
+
+Observed:
+  Total runtime: 124.8s / 1000 A rows
+  FAISS attach/build time: 7.0s
+  Embedding backend: faiss_hnsw_cpu
+  Output quality counts: low=913, medium=82, high=5
+  Output source counts: fallback=913, rules=87
+
+Full-run estimate:
+  Conservative end-to-end projection: 124.8s * 233.214 = 8.09h
+  Fixed startup/FAISS setup is about 15s, so actual should be closer to 7.1-8.1h.
+
+
+3. TF-IDF + NumPy brute-force embeddings, no LLM
+
+Command:
+  FAISS_ENABLED=0 .venv/bin/python run_matcher.py \
+    --limit-a 1000 \
+    --no-llm \
+    --max-workers 8 \
+    --checkpoint-every 1000 \
+    --min-confidence 0 \
+    --output-dir /tmp/bb-bench-numpy
+
+Setup:
+  Reused cached retrieval-index-b.pkl.
+  Reused cached B embeddings .npz.
+  Disabled FAISS to force previous NumPy matrix-dot embedding retrieval.
+
+Observed:
+  Total runtime: 139.7s / 1000 A rows
+  Embedding backend: numpy
+  Process RSS while scoring: about 4.5 GiB
+  CPU while scoring: about 600%
+  Output quality counts: low=913, medium=82, high=5
+  Output source counts: fallback=913, rules=87
+
+Full-run estimate:
+  Conservative end-to-end projection: 139.7s * 233.214 = 9.05h
+
+
+LLM estimates
+-------------
+Observed medium/high rule rate in the 1000-row sample:
+  87 / 1000 = 8.7%
+
+Estimated full-run LLM calls:
+  233,214 * 0.087 = about 20,290 calls
+
+With 8 workers, LLM wall-clock overhead is roughly:
+  1s average API call: 20,290 / 8 = 0.70h
+  2s average API call: 1.41h
+  5s average API call: 3.52h
+  10s average API call: 7.04h
+
+Full-run estimates with LLM:
+  TF-IDF only + LLM:
+    1s API avg: 4.9h
+    2s API avg: 5.6h
+    5s API avg: 7.7h
+    10s API avg: 11.2h
+
+  TF-IDF + FAISS embeddings + LLM:
+    1s API avg: 8.8h
+    2s API avg: 9.5h
+    5s API avg: 11.6h
+    10s API avg: 15.1h
+
+Recommendation
+--------------
+Use TF-IDF only for fastest full run:
+  .venv/bin/python run_matcher.py --no-embeddings --max-workers 8 --checkpoint-every 1000
+
+Use FAISS embeddings only if the extra recall is worth roughly doubling runtime:
+  .venv/bin/python run_matcher.py --max-workers 8 --checkpoint-every 1000
+
+FAISS details:
+  Package: faiss-cpu
+  No Docker/container needed.
+  Current implementation builds an in-memory FAISS HNSW CPU index each run from
+  cached B embeddings. For the current B catalog, that build took 7.0s.
+  If faiss-cpu is missing or FAISS_ENABLED=0, the code falls back to NumPy.
+
+Notes
+-----
+These estimates assume cached B embeddings for embedding paths. A cold embedding
+cache must first build B embeddings once, then save them to .npz.
+
+The RTX 3070 is not materially used by the current local embedding path; fastembed
+is running through the installed CPU runtime here. The main utilization observed
+was CPU.

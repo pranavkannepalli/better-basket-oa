@@ -269,7 +269,7 @@ def run_pipeline(
             attach_embedding_matrix(index, embeddings_b)
             del embeddings_b
             gc.collect()
-            _log_elapsed("Attached embedding matrix", started)
+            _log_elapsed(f"Attached embedding matrix: backend={index.get('embedding_backend')}", started)
         else:
             print("Embeddings disabled")
 
