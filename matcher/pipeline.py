@@ -2,6 +2,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import time
 
 from matcher.config import Settings
 from matcher.embeddings import embedding_cache_path
@@ -24,6 +25,10 @@ from matcher.scoring import HARD_CONTRADICTIONS, blend_scores, deterministic_onl
 from matcher.schemas import MatchDecision
 
 _settings = Settings()
+
+
+def _log_elapsed(message: str, started: float) -> None:
+    print(f"{message} in {time.perf_counter() - started:.1f}s")
 
 
 def _llm_choice_is_acceptable(llm_result: dict, chosen_pair) -> bool:
@@ -93,9 +98,11 @@ def _score_unmatched_item(
         scored.append(pair)
 
     scored.sort(key=lambda item: item.combined_score or 0.0, reverse=True)
+    best_rule_score = (scored[0].combined_score or 0.0) if scored else 0.0
+    requires_llm_eval = llm_enabled and best_rule_score >= _settings.medium_quality_threshold
     llm_candidates = (
         scored[:llm_top_n]
-        if llm_enabled and scored and (scored[0].combined_score or 0.0) >= llm_min_deterministic
+        if llm_enabled and scored and best_rule_score >= llm_min_deterministic
         else []
     )
 
@@ -114,7 +121,7 @@ def _score_unmatched_item(
                 llm_result["confidence"],
                 max(llm_result["exact_match_score"], llm_result["substitute_match_score"]),
             )
-            if _llm_choice_is_acceptable(llm_result, pair):
+            if requires_llm_eval or _llm_choice_is_acceptable(llm_result, pair):
                 forced_item_id_b = chosen_item_id_b
             break
 
@@ -135,11 +142,19 @@ def run_pipeline(
     item_retry_attempts: int = _settings.item_retry_attempts,
     checkpoint_every: int = 100,
 ):
+    started = time.perf_counter()
+    print(f"Normalizing products: A={len(rows_a)} rows, B={len(rows_b)} rows")
     products_a = dataframe_to_products(rows_a)
     products_b = dataframe_to_products(rows_b)
     del rows_a, rows_b
+    _log_elapsed(f"Normalized products: A={len(products_a)}, B={len(products_b)}", started)
+
+    started = time.perf_counter()
+    print("Building exact-match indexes")
     exact_index_b = build_global_id_index(products_b)
     provider_index_b = build_provider_id_index(products_b)
+    _log_elapsed("Built exact-match indexes", started)
+
     model = os.environ.get("OPENAI_MODEL", _settings.llm_model)
     checkpoint_every = max(checkpoint_every, 1)
     checkpoint_path = Path(output_dir) / "pipeline-checkpoint.json"
@@ -178,6 +193,8 @@ def run_pipeline(
 
     unmatched = []
 
+    started = time.perf_counter()
+    print("Scanning exact/provider matches")
     for position, item_a in enumerate(products_a):
         if decisions[position] is not None:
             continue
@@ -192,21 +209,55 @@ def run_pipeline(
             continue
 
         unmatched.append((position, item_a))
+    _log_elapsed(
+        f"Exact/provider scan complete: {completed} completed, {len(unmatched)} need retrieval",
+        started,
+    )
 
     if unmatched:
         retrieval_index_path = _settings.retrieval_index_path or Path(output_dir) / "retrieval-index-b.pkl"
+        started = time.perf_counter()
+        print(f"Loading/building retrieval index: {retrieval_index_path}")
         index = get_or_build_retrieval_index(products_b, retrieval_index_path)
+        matrix = index.get("matrix")
+        matrix_info = "no text matrix" if matrix is None else f"text nnz={matrix.nnz}"
+        _log_elapsed(f"Retrieval index ready: {len(index.get('items_b', []))} items, {matrix_info}", started)
+
+        started = time.perf_counter()
+        print(f"Preparing LLM/cache: enabled={llm_enabled}, model={model}")
         client = build_openai_client() if llm_enabled else None
         cache = open_cache(str(Path(output_dir) / "cache")) if llm_enabled else None
+        _log_elapsed("LLM/cache ready", started)
+
         local_embedding_model = None
         if embedding_model:
+            started = time.perf_counter()
+            print(f"Loading embedding model: {embedding_model}")
             local_embedding_model = load_local_embedding_model(embedding_model)
+            _log_elapsed("Embedding model ready", started)
+
             embeddings_path = embedding_cache_path(output_dir, embedding_model, index["dataset_signature"])
+            started = time.perf_counter()
+            print(f"Loading embedding cache: {embeddings_path}")
             embeddings_b = load_embedding_cache(embeddings_path, products_b)
             if embeddings_b is None:
+                _log_elapsed("Embedding cache miss", started)
+                started = time.perf_counter()
+                print(f"Building embeddings for {len(products_b)} B products")
                 embeddings_b = local_embedding_model.embed_products(products_b, batch_size=embedding_batch_size)
+                _log_elapsed("Built B embeddings", started)
+                started = time.perf_counter()
+                print(f"Saving embedding cache: {embeddings_path}")
                 save_embedding_cache(embeddings_path, embeddings_b, products_b)
+                _log_elapsed("Saved embedding cache", started)
+            else:
+                _log_elapsed(f"Loaded embedding cache: shape={embeddings_b.shape}", started)
+            started = time.perf_counter()
+            print("Attaching embedding matrix")
             attach_embedding_matrix(index, embeddings_b)
+            _log_elapsed("Attached embedding matrix", started)
+        else:
+            print("Embeddings disabled")
 
         def process(item_a, query_embedding=None):
             try:
@@ -258,6 +309,10 @@ def run_pipeline(
                 record_progress(position, decision)
 
         batch_size = max(embedding_batch_size, 1)
+        print(
+            f"Scoring retrieval rows: {len(unmatched)} items, "
+            f"batch_size={batch_size}, workers={max_workers}, llm={llm_enabled}"
+        )
         if max_workers > 1 and len(unmatched) > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 for start in range(0, len(unmatched), batch_size):

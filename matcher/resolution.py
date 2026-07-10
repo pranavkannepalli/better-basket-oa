@@ -20,7 +20,7 @@ def choose_best_match(
             best = sorted(candidates, key=lambda item: item.combined_score or 0.0, reverse=True)[0]
     else:
         best = sorted(candidates, key=lambda item: item.combined_score or 0.0, reverse=True)[0]
-    confidence = best.combined_score or 0.0
+    confidence = round(best.combined_score or 0.0, 4)
     if confidence >= high_quality_threshold:
         match_quality = "high"
         decision_source = "llm" if best.llm_score is not None else "rules"

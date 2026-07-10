@@ -4,6 +4,7 @@ import argparse
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import sys
+import time
 
 from dotenv import load_dotenv
 
@@ -50,10 +51,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load_catalog_records(path: str, limit: int | None = None) -> list[dict[str, str]]:
+    started = time.perf_counter()
+    print(f"Loading input: {path}")
     frame = load_catalog_csv(path)
     if limit is not None:
         frame = frame.head(limit)
-    return frame.to_dict("records")
+    records = frame.to_dict("records")
+    print(f"Loaded {len(records)} rows from {path} in {time.perf_counter() - started:.1f}s")
+    return records
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     with (output_dir / "run.log").open("w", encoding="utf-8") as log_file:
         with redirect_stdout(Tee(sys.stdout, log_file)), redirect_stderr(Tee(sys.stderr, log_file)):
             print(f"Writing outputs to {output_dir}")
+            started = time.perf_counter()
             decisions = run_pipeline(
                 _load_catalog_records(args.input_a, args.limit_a),
                 _load_catalog_records(args.input_b),
@@ -82,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
             write_submission_csv(output_dir / "matches.csv", decisions, min_confidence=args.min_confidence)
             write_matches_csv(output_dir / "match_decisions.csv", decisions)
             print(summarize_decisions(decisions))
+            print(f"Run finished in {time.perf_counter() - started:.1f}s")
     return 0
 
 
