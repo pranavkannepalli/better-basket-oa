@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm-top-n", type=int, default=settings.llm_top_n)
     parser.add_argument("--llm-min-deterministic", type=float, default=settings.llm_min_deterministic)
     parser.add_argument("--llm-backlog-limit", type=int, default=settings.llm_backlog_limit)
+    parser.add_argument("--llm-workers", type=int, default=settings.llm_workers)
     parser.add_argument("--embedding-model", default=settings.embedding_model)
     parser.add_argument("--embedding-batch-size", type=int, default=settings.embedding_batch_size)
     parser.add_argument("--no-embeddings", dest="embedding_model", action="store_const", const="")
@@ -174,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
                 llm_top_n=args.llm_top_n,
                 llm_min_deterministic=args.llm_min_deterministic,
                 llm_backlog_limit=args.llm_backlog_limit,
+                llm_workers=args.llm_workers,
                 embedding_model=args.embedding_model,
                 embedding_batch_size=args.embedding_batch_size,
                 max_workers=args.max_workers,

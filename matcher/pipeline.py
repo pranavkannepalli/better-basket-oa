@@ -360,6 +360,7 @@ def run_pipeline(
     llm_top_n: int = _settings.llm_top_n,
     llm_min_deterministic: float = _settings.llm_min_deterministic,
     llm_backlog_limit: int = _settings.llm_backlog_limit,
+    llm_workers: int = _settings.llm_workers,
     embedding_model: str = _settings.embedding_model,
     embedding_batch_size: int = _settings.embedding_batch_size,
     max_workers: int = _settings.max_workers,
@@ -600,6 +601,8 @@ def run_pipeline(
         resolved_llm_backlog_limit = (
             llm_backlog_limit if llm_backlog_limit > 0 else max(max_workers * 64, max_workers + 1)
         )
+        resolved_llm_workers = llm_workers if llm_workers > 0 else max_workers
+        resolved_llm_backlog_limit = max(resolved_llm_backlog_limit, resolved_llm_workers)
 
         def record_worker_activity(worker_id, worker_cpu_seconds) -> None:
             nonlocal process_worker_cpu_seconds
@@ -707,6 +710,7 @@ def run_pipeline(
             f"Scoring retrieval rows: {len(unmatched)} items, "
             f"batch_size={batch_size}, workers={max_workers}, worker_mode={worker_mode}, "
             f"process_start_method={resolved_process_start_method or 'n/a'}, llm={llm_enabled}, "
+            f"llm_workers={resolved_llm_workers if llm_enabled else 0}, "
             f"llm_backlog_limit={resolved_llm_backlog_limit if llm_enabled else 0}"
         )
         if use_process_pool and embedding_model:
@@ -747,12 +751,12 @@ def run_pipeline(
                     _PROCESS_WORKER_STATE = worker_state
                 context = multiprocessing.get_context(resolved_process_start_method)
                 if llm_enabled:
-                    llm_finish_executor = ThreadPoolExecutor(max_workers=max_workers)
+                    llm_finish_executor = ThreadPoolExecutor(max_workers=resolved_llm_workers)
                 try:
                     _log(
                         f"Starting process pool: max_workers={max_workers}, "
                         f"start_method={resolved_process_start_method}, "
-                        f"llm_finish_threads={max_workers if llm_enabled else 0}"
+                        f"llm_finish_threads={resolved_llm_workers if llm_enabled else 0}"
                     )
                     executor_kwargs = {
                         "max_workers": max_workers,
