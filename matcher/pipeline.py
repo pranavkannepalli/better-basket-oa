@@ -1,5 +1,5 @@
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import gc
 import multiprocessing
 import os
@@ -91,57 +91,30 @@ def _with_retries(fn, attempts: int):
     raise last_exc
 
 
-def _score_unmatched_item_process(payload):
-    item_a, query_embedding = payload
-    started_cpu = time.process_time()
-    try:
-        local_embedding_model = _PROCESS_WORKER_STATE.get("local_embedding_model")
-        if query_embedding is None and local_embedding_model is not None:
-            query_embedding = local_embedding_model.embed_products([item_a], batch_size=1)[0]
-        decision = _with_retries(
-            lambda: _score_unmatched_item(
-                item_a,
-                _PROCESS_WORKER_STATE["products_b"],
-                _PROCESS_WORKER_STATE["index"],
-                None,
-                None,
-                _PROCESS_WORKER_STATE["model"],
-                False,
-                _PROCESS_WORKER_STATE["retrieval_k"],
-                _PROCESS_WORKER_STATE["llm_top_n"],
-                _PROCESS_WORKER_STATE["llm_min_deterministic"],
-                query_embedding,
-            ),
-            _PROCESS_WORKER_STATE["item_retry_attempts"],
-        )
-    except Exception:  # noqa: BLE001 - preserve deliverable coverage on unexpected row failures.
-        decision = _fallback_decision(item_a, _PROCESS_WORKER_STATE["products_b"])
-    return decision, os.getpid(), time.process_time() - started_cpu
-
-
-def _score_unmatched_item(
-    item_a,
-    products_b,
-    index,
-    client,
-    cache,
-    model: str,
-    llm_enabled: bool,
-    retrieval_k: int,
-    llm_top_n: int,
-    llm_min_deterministic: float,
-    query_embedding=None,
-):
+def _score_deterministic_candidates(item_a, products_b, index, retrieval_k: int, query_embedding=None):
     candidates = retrieve_candidates(item_a, products_b, index=index, top_k=retrieval_k, query_embedding=query_embedding)
     candidates_by_id = {candidate.item_id: candidate for candidate in candidates}
     scored = []
-    forced_item_id_b = None
     for item_b in candidates:
         pair = score_candidate_pair(item_a, item_b)
         pair.combined_score = deterministic_only_score(pair.deterministic_score)
         scored.append(pair)
-
     scored.sort(key=lambda item: item.combined_score or 0.0, reverse=True)
+    return scored, candidates_by_id
+
+
+def _finish_scored_item_with_llm(
+    item_a,
+    scored,
+    candidates_by_id,
+    client,
+    cache,
+    model: str,
+    llm_enabled: bool,
+    llm_top_n: int,
+    llm_min_deterministic: float,
+):
+    forced_item_id_b = None
     best_rule_score = (scored[0].combined_score or 0.0) if scored else 0.0
     requires_llm_eval = llm_enabled and best_rule_score >= _settings.medium_quality_threshold
     llm_candidates = (
@@ -170,6 +143,74 @@ def _score_unmatched_item(
             break
 
     return choose_best_match(scored, forced_item_id_b=forced_item_id_b)
+
+
+def _score_unmatched_item_process(payload):
+    position, item_a, query_embedding = payload
+    started_cpu = time.process_time()
+    try:
+        local_embedding_model = _PROCESS_WORKER_STATE.get("local_embedding_model")
+        if query_embedding is None and local_embedding_model is not None:
+            query_embedding = local_embedding_model.embed_products([item_a], batch_size=1)[0]
+        llm_enabled = _PROCESS_WORKER_STATE["llm_enabled"]
+        scored, candidates_by_id = _with_retries(
+            lambda: _score_deterministic_candidates(
+                item_a,
+                _PROCESS_WORKER_STATE["products_b"],
+                _PROCESS_WORKER_STATE["index"],
+                _PROCESS_WORKER_STATE["retrieval_k"],
+                query_embedding,
+            ),
+            _PROCESS_WORKER_STATE["item_retry_attempts"],
+        )
+        best_rule_score = (scored[0].combined_score or 0.0) if scored else 0.0
+        if llm_enabled and scored and best_rule_score >= _PROCESS_WORKER_STATE["llm_min_deterministic"]:
+            return (
+                "llm",
+                position,
+                item_a,
+                scored,
+                candidates_by_id,
+                os.getpid(),
+                time.process_time() - started_cpu,
+            )
+        decision = choose_best_match(scored)
+    except Exception:  # noqa: BLE001 - preserve deliverable coverage on unexpected row failures.
+        decision = _fallback_decision(item_a, _PROCESS_WORKER_STATE["products_b"])
+    return ("decision", position, decision, None, None, os.getpid(), time.process_time() - started_cpu)
+
+
+def _score_unmatched_item(
+    item_a,
+    products_b,
+    index,
+    client,
+    cache,
+    model: str,
+    llm_enabled: bool,
+    retrieval_k: int,
+    llm_top_n: int,
+    llm_min_deterministic: float,
+    query_embedding=None,
+):
+    scored, candidates_by_id = _score_deterministic_candidates(
+        item_a,
+        products_b,
+        index,
+        retrieval_k,
+        query_embedding,
+    )
+    return _finish_scored_item_with_llm(
+        item_a,
+        scored,
+        candidates_by_id,
+        client,
+        cache,
+        model,
+        llm_enabled,
+        llm_top_n,
+        llm_min_deterministic,
+    )
 
 
 def run_pipeline(
@@ -365,6 +406,54 @@ def run_pipeline(
             except Exception:  # noqa: BLE001 - preserve deliverable coverage on unexpected row failures.
                 return _fallback_decision(item_a, products_b)
 
+        llm_finish_executor = None
+        pending_llm_finishes = []
+
+        def record_worker_activity(worker_id, worker_cpu_seconds) -> None:
+            nonlocal process_worker_cpu_seconds
+            if worker_id is not None:
+                with scoring_worker_lock:
+                    scoring_worker_ids.add(worker_id)
+            process_worker_cpu_seconds += worker_cpu_seconds
+
+        def finish_llm_item(position, item_a, scored, candidates_by_id):
+            decision = _finish_scored_item_with_llm(
+                item_a,
+                scored,
+                candidates_by_id,
+                client,
+                cache,
+                model,
+                llm_enabled,
+                llm_top_n,
+                llm_min_deterministic,
+            )
+            return position, decision
+
+        def submit_llm_finish(position, item_a, scored, candidates_by_id) -> None:
+            if llm_finish_executor is None:
+                position, decision = finish_llm_item(position, item_a, scored, candidates_by_id)
+                record_progress(position, decision)
+                return
+            pending_llm_finishes.append(
+                llm_finish_executor.submit(finish_llm_item, position, item_a, scored, candidates_by_id)
+            )
+
+        def drain_llm_finishes(block: bool = False) -> None:
+            if not pending_llm_finishes:
+                return
+            if block:
+                for future in as_completed(pending_llm_finishes):
+                    position, decision = future.result()
+                    record_progress(position, decision)
+                pending_llm_finishes.clear()
+                return
+            completed_futures = [future for future in pending_llm_finishes if future.done()]
+            for future in completed_futures:
+                pending_llm_finishes.remove(future)
+                position, decision = future.result()
+                record_progress(position, decision)
+
         def process_batch(batch, executor=None) -> None:
             batch_embeddings = (
                 local_embedding_model.embed_products(
@@ -375,10 +464,10 @@ def run_pipeline(
             )
 
             def process_pair(item_with_embedding):
-                (_, item_a), query_embedding = item_with_embedding
+                (position, item_a), query_embedding = item_with_embedding
                 with scoring_worker_lock:
                     scoring_worker_ids.add(threading.get_ident())
-                return process(item_a, query_embedding), None, 0.0
+                return ("decision", position, process(item_a, query_embedding), None, None, None, 0.0)
 
             pairs_with_embeddings = [
                 (
@@ -390,7 +479,10 @@ def run_pipeline(
             if worker_mode == "process" and executor is not None:
                 results = executor.map(
                     _score_unmatched_item_process,
-                    [(item_a, query_embedding) for (_, item_a), query_embedding in pairs_with_embeddings],
+                    [
+                        (position, item_a, query_embedding)
+                        for (position, item_a), query_embedding in pairs_with_embeddings
+                    ],
                 )
             else:
                 results = (
@@ -398,14 +490,17 @@ def run_pipeline(
                     if executor
                     else map(process_pair, pairs_with_embeddings)
                 )
-            for (position, _), (decision, worker_id, worker_cpu_seconds) in zip(batch, results):
-                record_progress(position, decision, worker_id, worker_cpu_seconds)
+            for result in results:
+                kind, position, payload, scored, candidates_by_id, worker_id, worker_cpu_seconds = result
+                if kind == "llm":
+                    record_worker_activity(worker_id, worker_cpu_seconds)
+                    submit_llm_finish(position, payload, scored, candidates_by_id)
+                    drain_llm_finishes()
+                else:
+                    record_progress(position, payload, worker_id, worker_cpu_seconds)
             del batch_embeddings
 
         batch_size = max(embedding_batch_size, 1)
-        if worker_mode == "process" and llm_enabled:
-            print("Process worker mode is CPU-only; falling back to thread workers because LLM is enabled")
-            worker_mode = "thread"
         print(
             f"Scoring retrieval rows: {len(unmatched)} items, "
             f"batch_size={batch_size}, workers={max_workers}, worker_mode={worker_mode}, llm={llm_enabled}"
@@ -421,6 +516,7 @@ def run_pipeline(
                     "products_b": products_b,
                     "index": index,
                     "model": model,
+                    "llm_enabled": llm_enabled,
                     "retrieval_k": retrieval_k,
                     "llm_top_n": llm_top_n,
                     "llm_min_deterministic": llm_min_deterministic,
@@ -428,10 +524,18 @@ def run_pipeline(
                     "local_embedding_model": local_embedding_model,
                 }
                 context = multiprocessing.get_context("fork")
-                with ProcessPoolExecutor(max_workers=max_workers, mp_context=context) as executor:
-                    for start in range(0, len(unmatched), batch_size):
-                        process_batch(unmatched[start : start + batch_size], executor)
-                _PROCESS_WORKER_STATE = {}
+                if llm_enabled:
+                    llm_finish_executor = ThreadPoolExecutor(max_workers=max_workers)
+                try:
+                    with ProcessPoolExecutor(max_workers=max_workers, mp_context=context) as executor:
+                        for start in range(0, len(unmatched), batch_size):
+                            process_batch(unmatched[start : start + batch_size], executor)
+                            drain_llm_finishes()
+                    drain_llm_finishes(block=True)
+                finally:
+                    if llm_finish_executor is not None:
+                        llm_finish_executor.shutdown(wait=True)
+                    _PROCESS_WORKER_STATE = {}
             else:
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     for start in range(0, len(unmatched), batch_size):

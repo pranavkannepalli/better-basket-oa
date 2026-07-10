@@ -158,6 +158,56 @@ Full-run estimate:
 
 LLM estimates
 -------------
+Hybrid process+thread LLM mode
+------------------------------
+Process worker mode now supports LLM runs. The CPU-heavy deterministic
+retrieval/scoring stage runs in forked process workers. Rows that need LLM
+evaluation are handed back to the parent process and finished in a thread pool,
+so CPU scoring can continue while API calls are in flight.
+
+TF-IDF + LLM, process workers, 200-row benchmark:
+  Command:
+    .venv/bin/python run_matcher.py \
+      --limit-a 200 \
+      --no-embeddings \
+      --worker-mode process \
+      --max-workers 8 \
+      --checkpoint-every 50 \
+      --min-confidence 0 \
+      --output-dir /tmp/bb-hybrid-process-200
+
+  Observed:
+    Total runtime: 16.9s / 200 A rows
+    LLM decisions: 19
+    Effective CPU cores during CPU-heavy checkpoints: 6.7-7.3
+    Final effective cores: 2.9 because the tail waited on LLM calls
+    Workers observed: 8
+
+TF-IDF + FAISS embeddings + LLM, process workers, 200-row benchmark:
+  Command:
+    .venv/bin/python run_matcher.py \
+      --limit-a 200 \
+      --worker-mode process \
+      --max-workers 8 \
+      --checkpoint-every 50 \
+      --min-confidence 0 \
+      --output-dir /tmp/bb-hybrid-emb-process-200
+
+  Setup:
+    Reused cached retrieval-index-b.pkl.
+    Reused cached B embeddings .npz.
+
+  Observed:
+    Total runtime: 23.9s / 200 A rows
+    LLM decisions: 19
+    Effective CPU cores during CPU-heavy checkpoints: 6.7-7.0
+    Final effective cores: 3.3 because the tail waited on LLM calls
+    Workers observed: 8
+
+Interpretation:
+  LLM runs can now burn CPU during deterministic scoring. Effective cores will
+  naturally fall near the end of a run if remaining work is mostly API waiting.
+
 Observed medium/high rule rate in the 1000-row sample:
   87 / 1000 = 8.7%
 
@@ -188,8 +238,8 @@ Recommendation
 Use TF-IDF only with process workers for fastest full run and high CPU use:
   .venv/bin/python run_matcher.py --no-embeddings --worker-mode process --max-workers 8 --checkpoint-every 1000
 
-Use thread workers when LLM is enabled:
-  .venv/bin/python run_matcher.py --no-embeddings --max-workers 8 --checkpoint-every 1000
+Use process workers for LLM runs when you want CPU scoring and API calls overlapped:
+  .venv/bin/python run_matcher.py --no-embeddings --worker-mode process --max-workers 8 --checkpoint-every 1000
 
 Use FAISS embeddings with process workers when you want higher recall and high CPU use:
   .venv/bin/python run_matcher.py --worker-mode process --max-workers 8 --checkpoint-every 1000
@@ -217,5 +267,6 @@ for CPU-bound deterministic scoring, especially --no-llm runs. It shares the
 already-loaded product/index memory copy-on-write and avoids the Python GIL
 limiting scoring to about 2 effective cores.
 
-If LLM is enabled, the pipeline falls back to thread workers because API clients
-and disk caches should stay in the parent process/thread pool path.
+If LLM is enabled, process workers do deterministic scoring and the parent
+finishes LLM-needed rows in a thread pool. This avoids forking API clients while
+still keeping CPU-heavy work in separate processes.
