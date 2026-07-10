@@ -194,6 +194,7 @@ def run_pipeline(
     completed = sum(decision is not None for decision in decisions)
     next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
     progress_started = time.perf_counter()
+    progress_cpu_started = time.process_time()
     progress_start_completed = completed
     scoring_thread_ids = set()
     scoring_thread_lock = threading.Lock()
@@ -215,14 +216,17 @@ def run_pipeline(
             if progress_callback is not None:
                 progress_callback(decisions, products_a_by_id, products_b_by_id)
             elapsed = time.perf_counter() - progress_started
+            cpu_elapsed = time.process_time() - progress_cpu_started
             completed_since_start = completed - progress_start_completed
             rate = completed_since_start / elapsed if elapsed > 0 else 0.0
+            effective_cores = cpu_elapsed / elapsed if elapsed > 0 else 0.0
             remaining = len(decisions) - completed
             eta = remaining / rate if rate > 0 else 0.0
             print(
                 f"Progress: {completed}/{len(decisions)} decisions complete "
                 f"({rate:.2f}/s, elapsed {_format_duration(elapsed)}, "
-                f"ETA {_format_duration(eta)}, workers configured={max_workers}, "
+                f"ETA {_format_duration(eta)}, CPU {_format_duration(cpu_elapsed)}, "
+                f"effective cores={effective_cores:.1f}, workers configured={max_workers}, "
                 f"workers observed={len(scoring_thread_ids)}); checkpoint saved to {checkpoint_path}"
             )
             next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
