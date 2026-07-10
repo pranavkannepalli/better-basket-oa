@@ -95,6 +95,9 @@ def _score_unmatched_item_process(payload):
     item_a, query_embedding = payload
     started_cpu = time.process_time()
     try:
+        local_embedding_model = _PROCESS_WORKER_STATE.get("local_embedding_model")
+        if query_embedding is None and local_embedding_model is not None:
+            query_embedding = local_embedding_model.embed_products([item_a], batch_size=1)[0]
         decision = _with_retries(
             lambda: _score_unmatched_item(
                 item_a,
@@ -367,7 +370,7 @@ def run_pipeline(
                 local_embedding_model.embed_products(
                     [item_a for _, item_a in batch], batch_size=embedding_batch_size
                 )
-                if local_embedding_model is not None
+                if local_embedding_model is not None and worker_mode != "process"
                 else None
             )
 
@@ -422,6 +425,7 @@ def run_pipeline(
                     "llm_top_n": llm_top_n,
                     "llm_min_deterministic": llm_min_deterministic,
                     "item_retry_attempts": item_retry_attempts,
+                    "local_embedding_model": local_embedding_model,
                 }
                 context = multiprocessing.get_context("fork")
                 with ProcessPoolExecutor(max_workers=max_workers, mp_context=context) as executor:

@@ -11,8 +11,8 @@ Fastest practical path:
     .venv/bin/python run_matcher.py --no-embeddings --worker-mode process --max-workers 8 --checkpoint-every 1000
 
 Default higher-recall path:
-  TF-IDF + local embeddings + FAISS CPU:
-    .venv/bin/python run_matcher.py --max-workers 8 --checkpoint-every 1000
+  TF-IDF + local embeddings + FAISS CPU + process workers:
+    .venv/bin/python run_matcher.py --worker-mode process --max-workers 8 --checkpoint-every 1000
 
 LLM adds time based on number of medium/high rule candidates. In the 1000-row
 sample, 87/1000 rows hit medium/high rules, so full run estimate is about
@@ -97,6 +97,37 @@ Full-run estimate:
   Fixed startup/FAISS setup is about 15s, so actual should be closer to 7.1-8.1h.
 
 
+2b. TF-IDF + FAISS CPU embeddings, no LLM, process workers with worker-side query embeddings
+
+Command:
+  .venv/bin/python run_matcher.py \
+    --limit-a 1000 \
+    --no-llm \
+    --worker-mode process \
+    --max-workers 8 \
+    --checkpoint-every 500 \
+    --min-confidence 0 \
+    --output-dir /tmp/bb-emb-process-workerembed-1000
+
+Setup:
+  Reused cached retrieval-index-b.pkl.
+  Reused cached B embeddings .npz.
+  Built in-memory FAISS HNSW CPU index from cached B embeddings.
+  Query embeddings were generated inside process workers, not in the parent.
+
+Observed:
+  Total runtime: 32.6s / 1000 A rows, including startup/index/output.
+  Scoring throughput: 57.86 decisions/s at final checkpoint.
+  Effective CPU cores during scoring: 7.6
+  Workers observed: 8
+  Output quality counts: low=913, medium=82, high=5
+  Output source counts: fallback=913, rules=87
+
+Full-run estimate:
+  Scoring projection only: 233,214 / 57.86 = 1.12h
+  Practical end-to-end estimate with output/checkpoints/startup: about 1.3-1.7h.
+
+
 3. TF-IDF + NumPy brute-force embeddings, no LLM
 
 Command:
@@ -160,8 +191,8 @@ Use TF-IDF only with process workers for fastest full run and high CPU use:
 Use thread workers when LLM is enabled:
   .venv/bin/python run_matcher.py --no-embeddings --max-workers 8 --checkpoint-every 1000
 
-Use FAISS embeddings only if the extra recall is worth roughly doubling runtime:
-  .venv/bin/python run_matcher.py --max-workers 8 --checkpoint-every 1000
+Use FAISS embeddings with process workers when you want higher recall and high CPU use:
+  .venv/bin/python run_matcher.py --worker-mode process --max-workers 8 --checkpoint-every 1000
 
 FAISS details:
   Package: faiss-cpu
