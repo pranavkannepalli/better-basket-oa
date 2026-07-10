@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import gc
 import os
 from pathlib import Path
+import threading
 import time
 from typing import Callable
 
@@ -194,6 +195,8 @@ def run_pipeline(
     next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
     progress_started = time.perf_counter()
     progress_start_completed = completed
+    scoring_thread_ids = set()
+    scoring_thread_lock = threading.Lock()
 
     def record_progress(position, decision) -> None:
         nonlocal completed, next_progress_log
@@ -219,7 +222,8 @@ def run_pipeline(
             print(
                 f"Progress: {completed}/{len(decisions)} decisions complete "
                 f"({rate:.2f}/s, elapsed {_format_duration(elapsed)}, "
-                f"ETA {_format_duration(eta)}); checkpoint saved to {checkpoint_path}"
+                f"ETA {_format_duration(eta)}, workers configured={max_workers}, "
+                f"workers observed={len(scoring_thread_ids)}); checkpoint saved to {checkpoint_path}"
             )
             next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
 
@@ -296,6 +300,8 @@ def run_pipeline(
             print("Embeddings disabled")
 
         def process(item_a, query_embedding=None):
+            with scoring_thread_lock:
+                scoring_thread_ids.add(threading.get_ident())
             try:
                 return _with_retries(
                     lambda: _score_unmatched_item(
