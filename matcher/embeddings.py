@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
+import time
+from typing import Callable
 
 import numpy as np
 
@@ -14,15 +16,27 @@ class LocalEmbeddingModel:
     model_name: str
     encoder: object
 
-    def embed_products(self, products, batch_size: int = 128) -> np.ndarray:
+    def embed_products(
+        self,
+        products,
+        batch_size: int = 128,
+        progress_callback: Callable[[int, int, float], None] | None = None,
+        batch_start_callback: Callable[[int, int, int], None] | None = None,
+        progress_interval: int = 5000,
+    ) -> np.ndarray:
         """Embed products into one compact float32 matrix without retaining all text."""
         if not products:
             return np.empty((0, 0), dtype=np.float32)
 
         matrix = None
         batch_size = max(batch_size, 1)
+        progress_interval = max(progress_interval, batch_size)
+        started = time.perf_counter()
+        next_progress = min(len(products), progress_interval)
         for start in range(0, len(products), batch_size):
             batch = products[start : start + batch_size]
+            if batch_start_callback is not None:
+                batch_start_callback(start, start + len(batch), len(products))
             texts = [_product_text(product) for product in batch]
             vectors = np.asarray(
                 list(self.encoder.embed(texts, batch_size=batch_size)),
@@ -33,6 +47,11 @@ class LocalEmbeddingModel:
             if matrix is None:
                 matrix = np.empty((len(products), vectors.shape[1]), dtype=np.float32)
             matrix[start : start + len(batch)] = vectors
+            completed = start + len(batch)
+            if progress_callback is not None and (completed >= next_progress or completed == len(products)):
+                progress_callback(completed, len(products), time.perf_counter() - started)
+                while next_progress <= completed and next_progress < len(products):
+                    next_progress += progress_interval
         return matrix
 
 

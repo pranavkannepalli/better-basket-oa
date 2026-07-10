@@ -34,7 +34,11 @@ _PROCESS_WORKER_STATE = {}
 
 
 def _log_elapsed(message: str, started: float) -> None:
-    print(f"{message} in {time.perf_counter() - started:.1f}s")
+    _log(f"{message} in {time.perf_counter() - started:.1f}s")
+
+
+def _log(message: str) -> None:
+    print(message, flush=True)
 
 
 def _format_duration(seconds: float) -> str:
@@ -60,26 +64,85 @@ def _resolve_process_start_method(requested: str) -> str:
     return method
 
 
+def _log_embedding_progress(label: str, completed: int, total: int, elapsed: float) -> None:
+    rate = completed / elapsed if elapsed > 0 else 0.0
+    remaining = total - completed
+    eta = remaining / rate if rate > 0 else 0.0
+    _log(
+        f"{label}: {completed}/{total} products "
+        f"({rate:.1f}/s, elapsed {_format_duration(elapsed)}, ETA {_format_duration(eta)})"
+    )
+
+
+def _log_embedding_batch_start(label: str, start: int, end: int, total: int) -> None:
+    _log(f"{label}: embedding products {start + 1}-{end}/{total}")
+
+
+def _worker_log(state: dict, message: str) -> None:
+    line = f"[process-worker pid={os.getpid()}] {message}"
+    _log(line)
+    worker_log_path = state.get("worker_log_path")
+    if worker_log_path:
+        log_path = Path(worker_log_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{line}\n")
+
+
 def _init_process_worker(state: dict) -> None:
     global _PROCESS_WORKER_STATE
     _PROCESS_WORKER_STATE = state
+    started = time.perf_counter()
     embedding_model_name = state.get("embedding_model_name")
     if not embedding_model_name:
+        _worker_log(state, "ready: no embedding model needed")
         return
 
+    _worker_log(state, f"loading embedding model: {embedding_model_name}")
     local_embedding_model = load_local_embedding_model(embedding_model_name)
     _PROCESS_WORKER_STATE["local_embedding_model"] = local_embedding_model
     embeddings_path = state.get("embedding_cache_path")
     if not embeddings_path:
+        _worker_log(state, f"ready: embedding model loaded in {time.perf_counter() - started:.1f}s")
         return
 
+    cache_started = time.perf_counter()
+    _worker_log(state, f"loading embedding cache: {embeddings_path}")
     embeddings = load_embedding_cache(Path(embeddings_path), state["products_b"])
     if embeddings is None:
+        _worker_log(state, "embedding cache miss; building worker-local B embeddings")
         embeddings = local_embedding_model.embed_products(
             state["products_b"],
             batch_size=state.get("embedding_batch_size", _settings.embedding_batch_size),
+            progress_callback=lambda completed, total, elapsed: _worker_log(
+                state,
+                (
+                    f"worker B embedding progress: {completed}/{total} "
+                    f"({completed / elapsed if elapsed > 0 else 0.0:.1f}/s, "
+                    f"elapsed {_format_duration(elapsed)})"
+                ),
+            ),
+            batch_start_callback=lambda start, end, total: _worker_log(
+                state,
+                f"worker B embedding batch: products {start + 1}-{end}/{total}",
+            ),
+            progress_interval=max(state.get("embedding_batch_size", _settings.embedding_batch_size) * 5, 500),
         )
+    else:
+        _worker_log(
+            state,
+            f"loaded embedding cache: shape={embeddings.shape} in {time.perf_counter() - cache_started:.1f}s",
+        )
+    attach_started = time.perf_counter()
+    _worker_log(state, "attaching worker-local embedding matrix")
     attach_embedding_matrix(state["index"], embeddings)
+    _worker_log(
+        state,
+        (
+            f"ready: backend={state['index'].get('embedding_backend')} "
+            f"attach={time.perf_counter() - attach_started:.1f}s total={time.perf_counter() - started:.1f}s"
+        ),
+    )
 
 
 def _llm_choice_is_acceptable(llm_result: dict, chosen_pair) -> bool:
@@ -381,7 +444,12 @@ def run_pipeline(
         use_process_pool = worker_mode == "process" and max_workers > 1 and len(unmatched) > 1
         if use_process_pool:
             resolved_process_start_method = _resolve_process_start_method(process_start_method)
-            print(f"Process worker start method: {resolved_process_start_method}")
+            _log(f"Process worker start method: {resolved_process_start_method}")
+            if llm_enabled:
+                _log(
+                    "Hybrid mode active: process workers do deterministic retrieval/scoring; "
+                    "parent threads finish LLM rows"
+                )
         started = time.perf_counter()
         print(f"Loading/building retrieval index: {retrieval_index_path}")
         index = get_or_build_retrieval_index(products_b, retrieval_index_path)
@@ -408,9 +476,15 @@ def run_pipeline(
 
             started = time.perf_counter()
             print(f"Loading embedding cache: {embeddings_path}")
+            print("Embedding cache is scoped to this output directory")
             embeddings_b = load_embedding_cache(embeddings_path, products_b)
             if embeddings_b is None:
                 _log_elapsed("Embedding cache miss", started)
+                progress_interval = max(embedding_batch_size * 5, 500)
+                _log(
+                    f"Cold B-embedding build started: {len(products_b)} products, "
+                    f"batch_size={embedding_batch_size}, progress_every={progress_interval}"
+                )
                 if local_embedding_model is None:
                     started = time.perf_counter()
                     print(f"Loading embedding model: {embedding_model}")
@@ -418,7 +492,23 @@ def run_pipeline(
                     _log_elapsed("Embedding model ready", started)
                 started = time.perf_counter()
                 print(f"Building embeddings for {len(products_b)} B products")
-                embeddings_b = local_embedding_model.embed_products(products_b, batch_size=embedding_batch_size)
+                embeddings_b = local_embedding_model.embed_products(
+                    products_b,
+                    batch_size=embedding_batch_size,
+                    progress_callback=lambda completed, total, elapsed: _log_embedding_progress(
+                        "B embedding build progress",
+                        completed,
+                        total,
+                        elapsed,
+                    ),
+                    batch_start_callback=lambda start, end, total: _log_embedding_batch_start(
+                        "B embedding batch",
+                        start,
+                        end,
+                        total,
+                    ),
+                    progress_interval=progress_interval,
+                )
                 _log_elapsed("Built B embeddings", started)
                 started = time.perf_counter()
                 print(f"Saving embedding cache: {embeddings_path}")
@@ -560,6 +650,15 @@ def run_pipeline(
             f"batch_size={batch_size}, workers={max_workers}, worker_mode={worker_mode}, "
             f"process_start_method={resolved_process_start_method or 'n/a'}, llm={llm_enabled}"
         )
+        if use_process_pool and embedding_model:
+            if resolved_process_start_method == "spawn":
+                worker_log_path = Path(output_dir) / "process-workers.log"
+                _log(
+                    "Embedding process mode: spawned workers load the model/cache and build worker-local "
+                    f"FAISS; worker setup log: {worker_log_path}"
+                )
+            else:
+                _log("Embedding process mode: fork workers share parent embedding state copy-on-write")
         progress_started = time.perf_counter()
         progress_cpu_started = time.process_time()
         progress_start_completed = completed
@@ -576,6 +675,7 @@ def run_pipeline(
                     "llm_top_n": llm_top_n,
                     "llm_min_deterministic": llm_min_deterministic,
                     "item_retry_attempts": item_retry_attempts,
+                    "worker_log_path": str(Path(output_dir) / "process-workers.log"),
                 }
                 if embedding_model:
                     if resolved_process_start_method == "spawn":
@@ -590,6 +690,11 @@ def run_pipeline(
                 if llm_enabled:
                     llm_finish_executor = ThreadPoolExecutor(max_workers=max_workers)
                 try:
+                    _log(
+                        f"Starting process pool: max_workers={max_workers}, "
+                        f"start_method={resolved_process_start_method}, "
+                        f"llm_finish_threads={max_workers if llm_enabled else 0}"
+                    )
                     executor_kwargs = {
                         "max_workers": max_workers,
                         "mp_context": context,

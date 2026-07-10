@@ -280,6 +280,12 @@ receives its own product/index state. On the embedding path, each spawned worker
 loads the local embedding model, loads cached B embeddings, and builds its own
 in-memory FAISS index.
 
+Logging:
+  Cold B-embedding cache builds now log every embedding batch plus progress/ETA.
+  Spawned process worker setup logs are written to:
+    <output-dir>/process-workers.log
+  The main run.log prints that path before process scoring starts.
+
 If LLM is enabled, process workers do deterministic scoring and the parent
 finishes LLM-needed rows in a thread pool. This avoids forking API clients while
 still keeping CPU-heavy work in separate processes.
