@@ -1,20 +1,82 @@
 """Command-line entry point for the matcher package."""
 
+import argparse
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+import sys
 
-from matcher.io import load_catalog_csv, write_matches_csv
+from dotenv import load_dotenv
+
+from matcher.config import Settings
+from matcher.io import load_catalog_csv, write_matches_csv, write_submission_csv
 from matcher.pipeline import run_pipeline, summarize_decisions
 
 
-def main() -> int:
-    input_a = load_catalog_csv("grocery_store_a_items_final.csv").to_dict("records")
-    input_b = load_catalog_csv("grocery_store_b_items_final.csv").to_dict("records")
-    decisions = run_pipeline(input_a, input_b, llm_enabled=True)
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
 
-    output_dir = Path("artifacts")
+    def write(self, data: str) -> int:
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    settings = Settings()
+    parser = argparse.ArgumentParser(description="Match Store A products to Store B products.")
+    parser.add_argument("--input-a", default=str(settings.input_a_path))
+    parser.add_argument("--input-b", default=str(settings.input_b_path))
+    parser.add_argument("--output-dir", default=str(settings.output_dir))
+    parser.add_argument("--limit-a", type=int, default=None)
+    parser.add_argument("--llm", dest="llm_enabled", action="store_true", default=True)
+    parser.add_argument("--no-llm", dest="llm_enabled", action="store_false")
+    parser.add_argument("--max-workers", type=int, default=settings.max_workers)
+    parser.add_argument("--item-retry-attempts", type=int, default=settings.item_retry_attempts)
+    parser.add_argument("--retrieval-k", type=int, default=settings.retrieval_k)
+    parser.add_argument("--llm-top-n", type=int, default=settings.llm_top_n)
+    parser.add_argument("--llm-min-deterministic", type=float, default=settings.llm_min_deterministic)
+    parser.add_argument("--embedding-model", default=settings.embedding_model)
+    parser.add_argument("--embedding-batch-size", type=int, default=settings.embedding_batch_size)
+    parser.add_argument("--no-embeddings", dest="embedding_model", action="store_const", const="")
+    parser.add_argument("--min-confidence", type=float, default=settings.min_confidence)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
+    args = build_parser().parse_args(argv)
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    write_matches_csv(output_dir / "matches.csv", decisions)
-    print(summarize_decisions(decisions))
+    with (output_dir / "run.log").open("w", encoding="utf-8") as log_file:
+        with redirect_stdout(Tee(sys.stdout, log_file)), redirect_stderr(Tee(sys.stderr, log_file)):
+            print(f"Writing outputs to {output_dir}")
+            input_a = load_catalog_csv(args.input_a).to_dict("records")
+            input_b = load_catalog_csv(args.input_b).to_dict("records")
+            if args.limit_a is not None:
+                input_a = input_a[: args.limit_a]
+            decisions = run_pipeline(
+                input_a,
+                input_b,
+                llm_enabled=args.llm_enabled,
+                output_dir=args.output_dir,
+                retrieval_k=args.retrieval_k,
+                llm_top_n=args.llm_top_n,
+                llm_min_deterministic=args.llm_min_deterministic,
+                embedding_model=args.embedding_model,
+                embedding_batch_size=args.embedding_batch_size,
+                max_workers=args.max_workers,
+                item_retry_attempts=args.item_retry_attempts,
+            )
+
+            write_submission_csv(output_dir / "matches.csv", decisions, min_confidence=args.min_confidence)
+            write_matches_csv(output_dir / "match_decisions.csv", decisions)
+            print(summarize_decisions(decisions))
     return 0
 
 

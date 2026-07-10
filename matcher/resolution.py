@@ -7,10 +7,19 @@ _settings = Settings()
 
 def choose_best_match(
     candidates,
+    forced_item_id_b: str | None = None,
     high_quality_threshold: float = _settings.high_quality_threshold,
     medium_quality_threshold: float = _settings.medium_quality_threshold,
 ):
-    best = sorted(candidates, key=lambda item: item.combined_score or 0.0, reverse=True)[0]
+    if forced_item_id_b is not None:
+        best = next(
+            (candidate for candidate in candidates if candidate.item_id_b == forced_item_id_b),
+            None,
+        )
+        if best is None:
+            best = sorted(candidates, key=lambda item: item.combined_score or 0.0, reverse=True)[0]
+    else:
+        best = sorted(candidates, key=lambda item: item.combined_score or 0.0, reverse=True)[0]
     confidence = best.combined_score or 0.0
     if confidence >= high_quality_threshold:
         match_quality = "high"
@@ -22,7 +31,7 @@ def choose_best_match(
         review_flag = False
     else:
         match_quality = "low"
-        decision_source = "fallback"
+        decision_source = "llm" if best.llm_score is not None else "fallback"
         review_flag = True
     return MatchDecision(
         item_id_a=best.item_id_a,

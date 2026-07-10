@@ -1,0 +1,8 @@
+.env
+.venv/
+artifacts/
+__pycache__/
+*.pyc
+*.egg-info/
+grocery_store_a_items_final.csv
+grocery_store_b_items_final.csv

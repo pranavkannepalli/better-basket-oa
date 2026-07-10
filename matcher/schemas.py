@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 class ProductRecord(BaseModel):
     item_id: str
     name: str
+    url: str = ""
     brand_raw: str = ""
     brand_norm: str = ""
     description: str = ""
@@ -16,6 +17,10 @@ class ProductRecord(BaseModel):
     pack_count: int | None = None
     form_flags: list[str] = Field(default_factory=list)
     attribute_flags: list[str] = Field(default_factory=list)
+    global_ids: list[str] = Field(default_factory=list)
+    source_product_id: str = ""
+    source_ids: dict[str, str] = Field(default_factory=dict)
+    identifier_flags: list[str] = Field(default_factory=list)
     tokens_core: list[str] = Field(default_factory=list)
     tokens_full: list[str] = Field(default_factory=list)
     raw_payload: dict[str, Any] = Field(default_factory=dict)
@@ -36,5 +41,5 @@ class MatchDecision(BaseModel):
     item_id_b: str
     confidence: float
     match_quality: Literal["high", "medium", "low"]
-    decision_source: Literal["rules", "llm", "fallback"]
+    decision_source: Literal["upc", "provider_id", "rules", "llm", "fallback"]
     review_flag: bool
