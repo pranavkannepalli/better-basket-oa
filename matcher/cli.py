@@ -61,6 +61,16 @@ def _load_catalog_records(path: str, limit: int | None = None) -> list[dict[str,
     return records
 
 
+def _write_outputs_atomic(output_dir: Path, decisions, min_confidence: float) -> None:
+    completed_decisions = [decision for decision in decisions if decision is not None]
+    tmp_submission_path = output_dir / "matches.csv.tmp"
+    tmp_decisions_path = output_dir / "match_decisions.csv.tmp"
+    write_submission_csv(tmp_submission_path, completed_decisions, min_confidence=min_confidence)
+    write_matches_csv(tmp_decisions_path, completed_decisions)
+    tmp_submission_path.replace(output_dir / "matches.csv")
+    tmp_decisions_path.replace(output_dir / "match_decisions.csv")
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     args = build_parser().parse_args(argv)
@@ -70,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
         with redirect_stdout(Tee(sys.stdout, log_file)), redirect_stderr(Tee(sys.stderr, log_file)):
             print(f"Writing outputs to {output_dir}")
             started = time.perf_counter()
+            progress_callback = lambda decisions: _write_outputs_atomic(
+                output_dir,
+                decisions,
+                args.min_confidence,
+            )
             decisions = run_pipeline(
                 _load_catalog_records(args.input_a, args.limit_a),
                 _load_catalog_records(args.input_b),
@@ -83,10 +98,10 @@ def main(argv: list[str] | None = None) -> int:
                 max_workers=args.max_workers,
                 item_retry_attempts=args.item_retry_attempts,
                 checkpoint_every=args.checkpoint_every,
+                progress_callback=progress_callback,
             )
 
-            write_submission_csv(output_dir / "matches.csv", decisions, min_confidence=args.min_confidence)
-            write_matches_csv(output_dir / "match_decisions.csv", decisions)
+            _write_outputs_atomic(output_dir, decisions, args.min_confidence)
             print(summarize_decisions(decisions))
             print(f"Run finished in {time.perf_counter() - started:.1f}s")
     return 0

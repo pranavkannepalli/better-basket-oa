@@ -18,6 +18,7 @@ class Settings(BaseModel):
         Path(os.environ["RETRIEVAL_INDEX_PATH"]) if "RETRIEVAL_INDEX_PATH" in os.environ else None
     )
     llm_model: str = os.environ.get("OPENAI_MODEL", "gpt-5.4-nano")
+    llm_temperature: float = float(os.environ.get("OPENAI_TEMPERATURE", "0"))
     embedding_model: str = os.environ.get("EMBEDDING_MODEL", DEFAULT_LOCAL_EMBEDDING_MODEL)
     embedding_batch_size: int = int(os.environ.get("EMBEDDING_BATCH_SIZE", "128"))
     retrieval_k: int = int(os.environ.get("RETRIEVAL_K", "30"))

@@ -1,16 +1,18 @@
 import json
 import os
-from typing import Literal
 
 from dotenv import load_dotenv
 from openai import BadRequestError
 from openai import OpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tenacity import retry
 from tenacity import stop_after_attempt
 from tenacity import wait_exponential
 
+from matcher.config import Settings
+
 load_dotenv()
+_settings = Settings()
 
 
 SYSTEM_PROMPT = """You are a retail product matcher for grocery price indexing.
@@ -26,17 +28,18 @@ Important rules:
 - Only choose from the provided shortlist.
 
 Scoring guidance:
-- `high` confidence behavior: mostly the same product for a shopper, even if private-label brand/name differs.
-- `medium` confidence behavior: probably the right substitute/match, but some uncertainty remains.
-- `low` confidence behavior: weak evidence or major mismatch.
+- Return numeric confidence values from 0.0 to 1.0.
+- High confidence: mostly the same product for a shopper, even if private-label brand/name differs.
+- Medium confidence: probably the right substitute/match, but some uncertainty remains.
+- Low confidence: weak evidence or major mismatch.
 """
 
 
 class ShortlistLLMResponse(BaseModel):
     chosen_item_id_b: str
-    exact_match_score: float
-    substitute_match_score: float
-    confidence: float | Literal["high", "medium", "low"]
+    exact_match_score: float = Field(ge=0.0, le=1.0)
+    substitute_match_score: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
     reason_codes: list[str]
     contradictions: list[str]
 
@@ -152,6 +155,7 @@ def score_shortlist_with_llm(client, model: str, item_a, candidates) -> dict:
         instructions=SYSTEM_PROMPT,
         input=build_shortlist_prompt(item_a, candidates),
         text_format=ShortlistLLMResponse,
+        temperature=_settings.llm_temperature,
     )
     return sanitize_llm_result(response.output_parsed.model_dump(), candidates)
 

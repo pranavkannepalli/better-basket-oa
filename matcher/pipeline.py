@@ -1,8 +1,10 @@
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+import gc
 import os
 from pathlib import Path
 import time
+from typing import Callable
 
 from matcher.config import Settings
 from matcher.embeddings import embedding_cache_path
@@ -141,6 +143,7 @@ def run_pipeline(
     max_workers: int = _settings.max_workers,
     item_retry_attempts: int = _settings.item_retry_attempts,
     checkpoint_every: int = 100,
+    progress_callback: Callable[[list[MatchDecision | None]], None] | None = None,
 ):
     started = time.perf_counter()
     print(f"Normalizing products: A={len(rows_a)} rows, B={len(rows_b)} rows")
@@ -188,6 +191,8 @@ def run_pipeline(
                     "decisions": [decision.model_dump() if decision is not None else None for decision in decisions],
                 },
             )
+            if progress_callback is not None:
+                progress_callback(decisions)
             print(f"Progress: {completed}/{len(decisions)} decisions complete; checkpoint saved to {checkpoint_path}")
             next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
 
@@ -213,6 +218,8 @@ def run_pipeline(
         f"Exact/provider scan complete: {completed} completed, {len(unmatched)} need retrieval",
         started,
     )
+    del exact_index_b, provider_index_b
+    gc.collect()
 
     if unmatched:
         retrieval_index_path = _settings.retrieval_index_path or Path(output_dir) / "retrieval-index-b.pkl"
@@ -255,6 +262,8 @@ def run_pipeline(
             started = time.perf_counter()
             print("Attaching embedding matrix")
             attach_embedding_matrix(index, embeddings_b)
+            del embeddings_b
+            gc.collect()
             _log_elapsed("Attached embedding matrix", started)
         else:
             print("Embeddings disabled")
@@ -307,6 +316,7 @@ def run_pipeline(
             )
             for (position, _), decision in zip(batch, results):
                 record_progress(position, decision)
+            del batch_embeddings
 
         batch_size = max(embedding_batch_size, 1)
         print(
@@ -328,6 +338,8 @@ def run_pipeline(
             "decisions": [decision.model_dump() if decision is not None else None for decision in decisions],
         },
     )
+    if progress_callback is not None:
+        progress_callback(decisions)
     print(f"Completed {completed}/{len(decisions)} decisions; checkpoint saved to {checkpoint_path}")
 
     for decision in decisions:
