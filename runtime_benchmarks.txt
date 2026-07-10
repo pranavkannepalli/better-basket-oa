@@ -262,10 +262,23 @@ was CPU.
 
 Process worker mode
 -------------------
---worker-mode process uses Linux fork + ProcessPoolExecutor. This is intended
-for CPU-bound deterministic scoring, especially --no-llm runs. It shares the
-already-loaded product/index memory copy-on-write and avoids the Python GIL
-limiting scoring to about 2 effective cores.
+--worker-mode process uses ProcessPoolExecutor for CPU-bound deterministic
+scoring, especially --no-llm runs. The default start method is:
+  Linux: fork
+  macOS: spawn
+
+You can force it with:
+  --process-start-method fork
+  --process-start-method spawn
+
+Linux fork shares the already-loaded product/index/FAISS memory copy-on-write
+and avoids the Python GIL limiting scoring to about 2 effective cores.
+
+macOS spawn starts fresh Python worker processes. That makes process mode work
+on Mac, but startup is slower and memory use is higher because each worker
+receives its own product/index state. On the embedding path, each spawned worker
+loads the local embedding model, loads cached B embeddings, and builds its own
+in-memory FAISS index.
 
 If LLM is enabled, process workers do deterministic scoring and the parent
 finishes LLM-needed rows in a thread pool. This avoids forking API clients while
