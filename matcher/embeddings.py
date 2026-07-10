@@ -14,19 +14,26 @@ class LocalEmbeddingModel:
     model_name: str
     encoder: object
 
-    def embed_products(self, products, batch_size: int = 128) -> dict[str, list[float]]:
-        texts = [_product_text(product) for product in products]
-        if not texts:
-            return {}
+    def embed_products(self, products, batch_size: int = 128) -> np.ndarray:
+        """Embed products into one compact float32 matrix without retaining all text."""
+        if not products:
+            return np.empty((0, 0), dtype=np.float32)
 
-        vectors = list(self.encoder.embed(texts, batch_size=max(batch_size, 1)))
-        vectors = np.asarray(vectors, dtype=np.float32)
-        if vectors.ndim == 1:
-            vectors = vectors.reshape(1, -1)
-        return {
-            product.item_id: [float(value) for value in vectors[index]]
-            for index, product in enumerate(products)
-        }
+        matrix = None
+        batch_size = max(batch_size, 1)
+        for start in range(0, len(products), batch_size):
+            batch = products[start : start + batch_size]
+            texts = [_product_text(product) for product in batch]
+            vectors = np.asarray(
+                list(self.encoder.embed(texts, batch_size=batch_size)),
+                dtype=np.float32,
+            )
+            if vectors.ndim == 1:
+                vectors = vectors.reshape(1, -1)
+            if matrix is None:
+                matrix = np.empty((len(products), vectors.shape[1]), dtype=np.float32)
+            matrix[start : start + len(batch)] = vectors
+        return matrix
 
 
 def _load_fastembed_model(model_name: str):
@@ -49,7 +56,7 @@ def embedding_cache_path(output_dir: str, model_name: str, dataset_signature: st
     return Path(output_dir) / "cache" / f"embeddings-b-{model_digest}-{dataset_signature[:16]}.npz"
 
 
-def load_embedding_cache(path: Path, products) -> dict[str, list[float]] | None:
+def load_embedding_cache(path: Path, products) -> np.ndarray | None:
     if not path.exists():
         return None
     with np.load(path, allow_pickle=False) as data:
@@ -58,14 +65,12 @@ def load_embedding_cache(path: Path, products) -> dict[str, list[float]] | None:
         if item_ids != expected_item_ids:
             return None
         matrix = np.asarray(data["matrix"], dtype=np.float32)
-    return {
-        item_id: [float(value) for value in matrix[index]]
-        for index, item_id in enumerate(item_ids)
-    }
+    return matrix
 
 
-def save_embedding_cache(path: Path, embeddings_by_item_id: dict[str, list[float]], products) -> None:
+def save_embedding_cache(path: Path, matrix: np.ndarray, products) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    item_ids = [product.item_id for product in products if product.item_id in embeddings_by_item_id]
-    matrix = np.asarray([embeddings_by_item_id[item_id] for item_id in item_ids], dtype=np.float32)
-    np.savez_compressed(path, item_ids=np.asarray(item_ids), matrix=matrix)
+    if len(matrix) != len(products):
+        raise ValueError("Embedding matrix must contain one row for every product")
+    item_ids = np.asarray([product.item_id for product in products])
+    np.savez_compressed(path, item_ids=item_ids, matrix=matrix)

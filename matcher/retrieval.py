@@ -5,7 +5,12 @@ from pathlib import Path
 
 import numpy as np
 from rapidfuzz.fuzz import token_set_ratio
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import HashingVectorizer
+from sklearn.feature_extraction.text import TfidfTransformer
+
+
+RETRIEVAL_INDEX_VERSION = 5
+TEXT_HASH_FEATURES = 2**20
 
 
 def _category_overlap(a: list[str], b: list[str]) -> float:
@@ -51,55 +56,58 @@ def _size_key(item):
 
 
 def build_retrieval_index(items_b):
+    items = list(items_b)
     by_brand = defaultdict(list)
     by_size = defaultdict(list)
-    corpus = []
 
-    for item in items_b:
+    for item in items:
         if item.brand_norm:
             by_brand[item.brand_norm].append(item)
         size_key = _size_key(item)
         if size_key:
             by_size[size_key].append(item)
-        corpus.append(_product_text(item))
 
-    vectorizer = TfidfVectorizer(ngram_range=(1, 2), min_df=1)
-    matrix = vectorizer.fit_transform(corpus) if corpus else None
+    vectorizer = HashingVectorizer(
+        n_features=TEXT_HASH_FEATURES,
+        ngram_range=(1, 2),
+        alternate_sign=False,
+        norm=None,
+        dtype=np.float32,
+    )
+    transformer = TfidfTransformer(norm="l2")
+    matrix = None
+    if items:
+        counts = vectorizer.transform(_product_text(item) for item in items)
+        matrix = transformer.fit_transform(counts).astype(np.float32, copy=False)
+        transformer.idf_ = transformer.idf_.astype(np.float32, copy=False)
 
     return {
         "by_brand": by_brand,
         "by_size": by_size,
         "vectorizer": vectorizer,
+        "transformer": transformer,
         "matrix": matrix,
-        "items_b": list(items_b),
-        "dataset_signature": _dataset_signature(items_b),
+        "items_b": items,
+        "dataset_signature": _dataset_signature(items),
+        "version": RETRIEVAL_INDEX_VERSION,
     }
 
 
 def _normalize_matrix(matrix: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
-    return matrix / norms
+    matrix /= norms
+    return matrix
 
 
-def attach_embedding_matrix(index, embeddings_by_item_id: dict[str, list[float]]) -> None:
+def attach_embedding_matrix(index, embeddings: np.ndarray) -> None:
     items_b = index.get("items_b", [])
-    vectors = []
-    item_indices = []
-    for idx, item in enumerate(items_b):
-        vector = embeddings_by_item_id.get(item.item_id)
-        if vector is None:
-            continue
-        vectors.append(vector)
-        item_indices.append(idx)
-
-    if not vectors:
+    if len(embeddings) == 0:
         index["embedding_matrix"] = None
-        index["embedding_item_indices"] = []
         return
-
-    index["embedding_matrix"] = _normalize_matrix(np.asarray(vectors, dtype=np.float32))
-    index["embedding_item_indices"] = item_indices
+    if len(embeddings) != len(items_b):
+        raise ValueError("Embedding matrix must contain one row for every retrieval item")
+    index["embedding_matrix"] = _normalize_matrix(np.asarray(embeddings, dtype=np.float32))
 
 
 def save_retrieval_index(path, index) -> None:
@@ -123,7 +131,11 @@ def get_or_build_retrieval_index(items_b, path=None):
                 cached = load_retrieval_index(index_path)
             except (pickle.PickleError, EOFError, AttributeError, ValueError):
                 cached = None
-            if cached is not None and cached.get("dataset_signature") == expected_signature:
+            if (
+                cached is not None
+                and cached.get("dataset_signature") == expected_signature
+                and cached.get("version") == RETRIEVAL_INDEX_VERSION
+            ):
                 return cached
 
     index = build_retrieval_index(items_b)
@@ -135,11 +147,12 @@ def get_or_build_retrieval_index(items_b, path=None):
 def _semantic_candidates(item_a, index, limit: int) -> list:
     matrix = index.get("matrix")
     vectorizer = index.get("vectorizer")
+    transformer = index.get("transformer")
     items_b = index.get("items_b", [])
-    if matrix is None or not items_b:
+    if matrix is None or vectorizer is None or transformer is None or not items_b:
         return []
 
-    query = vectorizer.transform([_product_text(item_a)])
+    query = transformer.transform(vectorizer.transform([_product_text(item_a)]))
     similarities = (matrix @ query.T).toarray().ravel()
     if len(similarities) <= limit:
         top_indices = np.argsort(similarities)[::-1]
@@ -151,9 +164,8 @@ def _semantic_candidates(item_a, index, limit: int) -> list:
 
 def _embedding_candidates(query_embedding, index, limit: int) -> list:
     matrix = index.get("embedding_matrix")
-    item_indices = index.get("embedding_item_indices", [])
     items_b = index.get("items_b", [])
-    if query_embedding is None or matrix is None or not item_indices:
+    if query_embedding is None or matrix is None or not items_b:
         return []
 
     query = np.asarray(query_embedding, dtype=np.float32)
@@ -166,14 +178,15 @@ def _embedding_candidates(query_embedding, index, limit: int) -> list:
     else:
         top_positions = np.argpartition(similarities, -limit)[-limit:]
         top_positions = top_positions[np.argsort(similarities[top_positions])[::-1]]
-    return [items_b[item_indices[int(pos)]] for pos in top_positions if similarities[int(pos)] > 0]
+    return [items_b[int(pos)] for pos in top_positions if similarities[int(pos)] > 0]
 
 
 def retrieve_candidates(item_a, items_b, index=None, top_k: int = 200, query_embedding=None):
     search_space = []
     if index:
-        search_space.extend(_embedding_candidates(query_embedding, index, max(top_k * 3, 200)))
-        search_space.extend(_semantic_candidates(item_a, index, max(top_k * 3, 200)))
+        candidate_pool_size = max(top_k * 5, 300)
+        search_space.extend(_embedding_candidates(query_embedding, index, candidate_pool_size))
+        search_space.extend(_semantic_candidates(item_a, index, candidate_pool_size))
         if item_a.brand_norm in index["by_brand"]:
             search_space.extend(index["by_brand"][item_a.brand_norm])
         size_key = _size_key(item_a)
@@ -188,6 +201,7 @@ def retrieve_candidates(item_a, items_b, index=None, top_k: int = 200, query_emb
     deduped = {item.item_id: item for item in search_space}.values()
     scored = []
     query = " ".join(item_a.tokens_core)
+    item_a_text = _product_text(item_a)
     for item_b in deduped:
         text_score = token_set_ratio(query, " ".join(item_b.tokens_core)) / 100.0
         cat_score = _category_overlap(item_a.category_path, item_b.category_path)
@@ -200,7 +214,7 @@ def retrieve_candidates(item_a, items_b, index=None, top_k: int = 200, query_emb
             and item_a.size_unit == item_b.size_unit
             else 0.0
         )
-        semantic_score = token_set_ratio(_product_text(item_a), _product_text(item_b)) / 100.0
+        semantic_score = token_set_ratio(item_a_text, _product_text(item_b)) / 100.0
         score = (
             (0.35 * text_score)
             + (0.25 * semantic_score)

@@ -140,7 +140,6 @@ def dataframe_to_products(rows: list[dict[str, str]]) -> list[ProductRecord]:
                 source_product_id=source_ids.get("url_product_id", extract_source_product_id(url)),
                 source_ids=source_ids,
                 identifier_flags=sorted(set(global_id_flags + source_id_flags)),
-                raw_payload=dict(row),
             )
         )
     return products

@@ -49,6 +49,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_catalog_records(path: str, limit: int | None = None) -> list[dict[str, str]]:
+    frame = load_catalog_csv(path)
+    if limit is not None:
+        frame = frame.head(limit)
+    return frame.to_dict("records")
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     args = build_parser().parse_args(argv)
@@ -57,13 +64,9 @@ def main(argv: list[str] | None = None) -> int:
     with (output_dir / "run.log").open("w", encoding="utf-8") as log_file:
         with redirect_stdout(Tee(sys.stdout, log_file)), redirect_stderr(Tee(sys.stderr, log_file)):
             print(f"Writing outputs to {output_dir}")
-            input_a = load_catalog_csv(args.input_a).to_dict("records")
-            input_b = load_catalog_csv(args.input_b).to_dict("records")
-            if args.limit_a is not None:
-                input_a = input_a[: args.limit_a]
             decisions = run_pipeline(
-                input_a,
-                input_b,
+                _load_catalog_records(args.input_a, args.limit_a),
+                _load_catalog_records(args.input_b),
                 llm_enabled=args.llm_enabled,
                 output_dir=args.output_dir,
                 retrieval_k=args.retrieval_k,

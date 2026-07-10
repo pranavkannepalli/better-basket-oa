@@ -137,6 +137,7 @@ def run_pipeline(
 ):
     products_a = dataframe_to_products(rows_a)
     products_b = dataframe_to_products(rows_b)
+    del rows_a, rows_b
     exact_index_b = build_global_id_index(products_b)
     provider_index_b = build_provider_id_index(products_b)
     model = os.environ.get("OPENAI_MODEL", _settings.llm_model)
@@ -197,7 +198,7 @@ def run_pipeline(
         index = get_or_build_retrieval_index(products_b, retrieval_index_path)
         client = build_openai_client() if llm_enabled else None
         cache = open_cache(str(Path(output_dir) / "cache")) if llm_enabled else None
-        query_embeddings = {}
+        local_embedding_model = None
         if embedding_model:
             local_embedding_model = load_local_embedding_model(embedding_model)
             embeddings_path = embedding_cache_path(output_dir, embedding_model, index["dataset_signature"])
@@ -206,10 +207,8 @@ def run_pipeline(
                 embeddings_b = local_embedding_model.embed_products(products_b, batch_size=embedding_batch_size)
                 save_embedding_cache(embeddings_path, embeddings_b, products_b)
             attach_embedding_matrix(index, embeddings_b)
-            unmatched_products = [item_a for _, item_a in unmatched]
-            query_embeddings = local_embedding_model.embed_products(unmatched_products, batch_size=embedding_batch_size)
 
-        def process(item_a):
+        def process(item_a, query_embedding=None):
             try:
                 return _with_retries(
                     lambda: _score_unmatched_item(
@@ -223,20 +222,49 @@ def run_pipeline(
                         retrieval_k,
                         llm_top_n,
                         llm_min_deterministic,
-                        query_embeddings.get(item_a.item_id),
+                        query_embedding,
                     ),
                     item_retry_attempts,
                 )
             except Exception:  # noqa: BLE001 - preserve deliverable coverage on unexpected row failures.
                 return _fallback_decision(item_a, products_b)
 
+        def process_batch(batch, executor=None) -> None:
+            batch_embeddings = (
+                local_embedding_model.embed_products(
+                    [item_a for _, item_a in batch], batch_size=embedding_batch_size
+                )
+                if local_embedding_model is not None
+                else None
+            )
+
+            def process_pair(item_with_embedding):
+                (_, item_a), query_embedding = item_with_embedding
+                return process(item_a, query_embedding)
+
+            pairs_with_embeddings = (
+                (
+                    (position, item_a),
+                    batch_embeddings[offset] if batch_embeddings is not None else None,
+                )
+                for offset, (position, item_a) in enumerate(batch)
+            )
+            results = (
+                executor.map(process_pair, pairs_with_embeddings)
+                if executor
+                else map(process_pair, pairs_with_embeddings)
+            )
+            for (position, _), decision in zip(batch, results):
+                record_progress(position, decision)
+
+        batch_size = max(embedding_batch_size, 1)
         if max_workers > 1 and len(unmatched) > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                for (position, _), decision in zip(unmatched, executor.map(lambda pair: process(pair[1]), unmatched)):
-                    record_progress(position, decision)
+                for start in range(0, len(unmatched), batch_size):
+                    process_batch(unmatched[start : start + batch_size], executor)
         else:
-            for position, item_a in unmatched:
-                record_progress(position, process(item_a))
+            for start in range(0, len(unmatched), batch_size):
+                process_batch(unmatched[start : start + batch_size])
 
     save_checkpoint(
         checkpoint_path,
