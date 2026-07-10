@@ -15,12 +15,13 @@ from matcher.exact import (
     choose_provider_id_match,
 )
 from matcher.llm import build_openai_client, score_shortlist_with_llm_cached
-from matcher.persistence import append_match_log, open_cache
+from matcher.persistence import append_match_log, load_checkpoint, open_cache, save_checkpoint
 from matcher.io import dataframe_to_products
 from matcher.retrieval import get_or_build_retrieval_index, retrieve_candidates
 from matcher.retrieval import attach_embedding_matrix
 from matcher.resolution import choose_best_match
 from matcher.scoring import HARD_CONTRADICTIONS, blend_scores, deterministic_only_score, score_candidate_pair
+from matcher.schemas import MatchDecision
 
 _settings = Settings()
 
@@ -132,24 +133,61 @@ def run_pipeline(
     embedding_batch_size: int = _settings.embedding_batch_size,
     max_workers: int = _settings.max_workers,
     item_retry_attempts: int = _settings.item_retry_attempts,
+    checkpoint_every: int = 100,
 ):
     products_a = dataframe_to_products(rows_a)
     products_b = dataframe_to_products(rows_b)
     exact_index_b = build_global_id_index(products_b)
     provider_index_b = build_provider_id_index(products_b)
     model = os.environ.get("OPENAI_MODEL", _settings.llm_model)
+    checkpoint_every = max(checkpoint_every, 1)
+    checkpoint_path = Path(output_dir) / "pipeline-checkpoint.json"
+    checkpoint = load_checkpoint(checkpoint_path)
+    item_ids_a = [item.item_id for item in products_a]
     decisions = [None] * len(products_a)
+    if checkpoint and checkpoint.get("item_ids_a") == item_ids_a:
+        saved_decisions = checkpoint.get("decisions", [])
+        for position, saved_decision in enumerate(saved_decisions[: len(decisions)]):
+            if saved_decision is not None:
+                decisions[position] = MatchDecision.model_validate(saved_decision)
+        restored_count = sum(decision is not None for decision in decisions)
+        print(f"Resumed {restored_count}/{len(decisions)} decisions from {checkpoint_path}")
+    elif checkpoint:
+        print(f"Ignoring checkpoint with different input rows: {checkpoint_path}")
+
+    completed = sum(decision is not None for decision in decisions)
+    next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
+
+    def record_progress(position, decision) -> None:
+        nonlocal completed, next_progress_log
+        if decisions[position] is not None:
+            return
+        decisions[position] = decision
+        completed += 1
+        if completed >= next_progress_log:
+            save_checkpoint(
+                checkpoint_path,
+                {
+                    "item_ids_a": item_ids_a,
+                    "decisions": [decision.model_dump() if decision is not None else None for decision in decisions],
+                },
+            )
+            print(f"Progress: {completed}/{len(decisions)} decisions complete; checkpoint saved to {checkpoint_path}")
+            next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
+
     unmatched = []
 
     for position, item_a in enumerate(products_a):
+        if decisions[position] is not None:
+            continue
         exact_decision = choose_exact_global_id_match(item_a, exact_index_b)
         if exact_decision is not None:
-            decisions[position] = exact_decision
+            record_progress(position, exact_decision)
             continue
 
         provider_decision = choose_provider_id_match(item_a, provider_index_b)
         if provider_decision is not None:
-            decisions[position] = provider_decision
+            record_progress(position, provider_decision)
             continue
 
         unmatched.append((position, item_a))
@@ -195,10 +233,19 @@ def run_pipeline(
         if max_workers > 1 and len(unmatched) > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 for (position, _), decision in zip(unmatched, executor.map(lambda pair: process(pair[1]), unmatched)):
-                    decisions[position] = decision
+                    record_progress(position, decision)
         else:
             for position, item_a in unmatched:
-                decisions[position] = process(item_a)
+                record_progress(position, process(item_a))
+
+    save_checkpoint(
+        checkpoint_path,
+        {
+            "item_ids_a": item_ids_a,
+            "decisions": [decision.model_dump() if decision is not None else None for decision in decisions],
+        },
+    )
+    print(f"Completed {completed}/{len(decisions)} decisions; checkpoint saved to {checkpoint_path}")
 
     for decision in decisions:
         _append_decision_log(output_dir, decision)

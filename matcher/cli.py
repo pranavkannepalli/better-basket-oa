@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-llm", dest="llm_enabled", action="store_false")
     parser.add_argument("--max-workers", type=int, default=settings.max_workers)
     parser.add_argument("--item-retry-attempts", type=int, default=settings.item_retry_attempts)
+    parser.add_argument("--checkpoint-every", type=int, default=100)
     parser.add_argument("--retrieval-k", type=int, default=settings.retrieval_k)
     parser.add_argument("--llm-top-n", type=int, default=settings.llm_top_n)
     parser.add_argument("--llm-min-deterministic", type=float, default=settings.llm_min_deterministic)
@@ -72,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
                 embedding_batch_size=args.embedding_batch_size,
                 max_workers=args.max_workers,
                 item_retry_attempts=args.item_retry_attempts,
+                checkpoint_every=args.checkpoint_every,
             )
 
             write_submission_csv(output_dir / "matches.csv", decisions, min_confidence=args.min_confidence)
