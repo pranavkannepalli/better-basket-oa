@@ -33,6 +33,17 @@ def _log_elapsed(message: str, started: float) -> None:
     print(f"{message} in {time.perf_counter() - started:.1f}s")
 
 
+def _format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
 def _llm_choice_is_acceptable(llm_result: dict, chosen_pair) -> bool:
     if llm_result["confidence"] < _settings.medium_quality_threshold:
         return False
@@ -181,6 +192,8 @@ def run_pipeline(
 
     completed = sum(decision is not None for decision in decisions)
     next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
+    progress_started = time.perf_counter()
+    progress_start_completed = completed
 
     def record_progress(position, decision) -> None:
         nonlocal completed, next_progress_log
@@ -198,7 +211,16 @@ def run_pipeline(
             )
             if progress_callback is not None:
                 progress_callback(decisions, products_a_by_id, products_b_by_id)
-            print(f"Progress: {completed}/{len(decisions)} decisions complete; checkpoint saved to {checkpoint_path}")
+            elapsed = time.perf_counter() - progress_started
+            completed_since_start = completed - progress_start_completed
+            rate = completed_since_start / elapsed if elapsed > 0 else 0.0
+            remaining = len(decisions) - completed
+            eta = remaining / rate if rate > 0 else 0.0
+            print(
+                f"Progress: {completed}/{len(decisions)} decisions complete "
+                f"({rate:.2f}/s, elapsed {_format_duration(elapsed)}, "
+                f"ETA {_format_duration(eta)}); checkpoint saved to {checkpoint_path}"
+            )
             next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
 
     unmatched = []
