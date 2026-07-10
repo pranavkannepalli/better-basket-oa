@@ -24,7 +24,7 @@ from matcher.retrieval import get_or_build_retrieval_index, retrieve_candidates
 from matcher.retrieval import attach_embedding_matrix
 from matcher.resolution import choose_best_match
 from matcher.scoring import HARD_CONTRADICTIONS, blend_scores, deterministic_only_score, score_candidate_pair
-from matcher.schemas import MatchDecision
+from matcher.schemas import MatchDecision, ProductRecord
 
 _settings = Settings()
 
@@ -143,13 +143,18 @@ def run_pipeline(
     max_workers: int = _settings.max_workers,
     item_retry_attempts: int = _settings.item_retry_attempts,
     checkpoint_every: int = 100,
-    progress_callback: Callable[[list[MatchDecision | None]], None] | None = None,
+    progress_callback: Callable[
+        [list[MatchDecision | None], dict[str, ProductRecord], dict[str, ProductRecord]], None
+    ]
+    | None = None,
 ):
     started = time.perf_counter()
     print(f"Normalizing products: A={len(rows_a)} rows, B={len(rows_b)} rows")
     products_a = dataframe_to_products(rows_a)
     products_b = dataframe_to_products(rows_b)
     del rows_a, rows_b
+    products_a_by_id = {product.item_id: product for product in products_a}
+    products_b_by_id = {product.item_id: product for product in products_b}
     _log_elapsed(f"Normalized products: A={len(products_a)}, B={len(products_b)}", started)
 
     started = time.perf_counter()
@@ -192,7 +197,7 @@ def run_pipeline(
                 },
             )
             if progress_callback is not None:
-                progress_callback(decisions)
+                progress_callback(decisions, products_a_by_id, products_b_by_id)
             print(f"Progress: {completed}/{len(decisions)} decisions complete; checkpoint saved to {checkpoint_path}")
             next_progress_log = ((completed // checkpoint_every) + 1) * checkpoint_every
 
@@ -339,7 +344,7 @@ def run_pipeline(
         },
     )
     if progress_callback is not None:
-        progress_callback(decisions)
+        progress_callback(decisions, products_a_by_id, products_b_by_id)
     print(f"Completed {completed}/{len(decisions)} decisions; checkpoint saved to {checkpoint_path}")
 
     for decision in decisions:

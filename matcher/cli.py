@@ -9,7 +9,12 @@ import time
 from dotenv import load_dotenv
 
 from matcher.config import Settings
-from matcher.io import load_catalog_csv, write_matches_csv, write_submission_csv
+from matcher.io import (
+    load_catalog_csv,
+    write_detailed_submission_csv,
+    write_matches_csv,
+    write_submission_csv,
+)
 from matcher.pipeline import run_pipeline, summarize_decisions
 
 
@@ -61,13 +66,28 @@ def _load_catalog_records(path: str, limit: int | None = None) -> list[dict[str,
     return records
 
 
-def _write_outputs_atomic(output_dir: Path, decisions, min_confidence: float) -> None:
+def _write_outputs_atomic(
+    output_dir: Path,
+    decisions,
+    products_a_by_id,
+    products_b_by_id,
+    min_confidence: float,
+) -> None:
     completed_decisions = [decision for decision in decisions if decision is not None]
     tmp_submission_path = output_dir / "matches.csv.tmp"
+    tmp_detailed_submission_path = output_dir / "matches_detailed.csv.tmp"
     tmp_decisions_path = output_dir / "match_decisions.csv.tmp"
     write_submission_csv(tmp_submission_path, completed_decisions, min_confidence=min_confidence)
-    write_matches_csv(tmp_decisions_path, completed_decisions)
+    write_detailed_submission_csv(
+        tmp_detailed_submission_path,
+        completed_decisions,
+        products_a_by_id,
+        products_b_by_id,
+        min_confidence=min_confidence,
+    )
+    write_matches_csv(tmp_decisions_path, completed_decisions, products_a_by_id, products_b_by_id)
     tmp_submission_path.replace(output_dir / "matches.csv")
+    tmp_detailed_submission_path.replace(output_dir / "matches_detailed.csv")
     tmp_decisions_path.replace(output_dir / "match_decisions.csv")
 
 
@@ -80,9 +100,11 @@ def main(argv: list[str] | None = None) -> int:
         with redirect_stdout(Tee(sys.stdout, log_file)), redirect_stderr(Tee(sys.stderr, log_file)):
             print(f"Writing outputs to {output_dir}")
             started = time.perf_counter()
-            progress_callback = lambda decisions: _write_outputs_atomic(
+            progress_callback = lambda decisions, products_a_by_id, products_b_by_id: _write_outputs_atomic(
                 output_dir,
                 decisions,
+                products_a_by_id,
+                products_b_by_id,
                 args.min_confidence,
             )
             decisions = run_pipeline(
@@ -101,7 +123,6 @@ def main(argv: list[str] | None = None) -> int:
                 progress_callback=progress_callback,
             )
 
-            _write_outputs_atomic(output_dir, decisions, args.min_confidence)
             print(summarize_decisions(decisions))
             print(f"Run finished in {time.perf_counter() - started:.1f}s")
     return 0
