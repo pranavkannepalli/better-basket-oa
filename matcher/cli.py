@@ -55,15 +55,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_catalog_records(path: str, limit: int | None = None) -> list[dict[str, str]]:
+def _load_catalog_frame(path: str, limit: int | None = None):
     started = time.perf_counter()
     print(f"Loading input: {path}")
     frame = load_catalog_csv(path)
     if limit is not None:
         frame = frame.head(limit)
-    records = frame.to_dict("records")
-    print(f"Loaded {len(records)} rows from {path} in {time.perf_counter() - started:.1f}s")
-    return records
+    print(f"Loaded {len(frame)} rows from {path} in {time.perf_counter() - started:.1f}s")
+    return frame
 
 
 def _write_outputs_atomic(
@@ -108,8 +107,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.min_confidence,
             )
             decisions = run_pipeline(
-                _load_catalog_records(args.input_a, args.limit_a),
-                _load_catalog_records(args.input_b),
+                _load_catalog_frame(args.input_a, args.limit_a),
+                _load_catalog_frame(args.input_b),
                 llm_enabled=args.llm_enabled,
                 output_dir=args.output_dir,
                 retrieval_k=args.retrieval_k,

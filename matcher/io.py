@@ -8,13 +8,13 @@ import pandas as pd
 from matcher.schemas import MatchDecision
 
 from matcher.normalize import (
+    ATTRIBUTE_KEYWORDS,
+    FORM_KEYWORDS,
+    STOPWORDS,
     extract_attribute_flags,
-    extract_core_tokens,
     extract_form_flags,
     extract_pack_count,
     extract_size,
-    normalize_brand,
-    normalize_name,
 )
 from matcher.identifiers import extract_global_ids, extract_source_ids, extract_source_product_id
 from matcher.parsing import parse_item_info, parse_sizing_comp
@@ -37,12 +37,35 @@ def load_catalog_csv(path: str | PathLike[str]) -> pd.DataFrame:
     return pd.read_csv(path, dtype=str, keep_default_na=False, na_filter=False)
 
 
-def _parse_boolish(value: str) -> bool:
-    return str(value).strip().lower() in {"1", "true", "t", "yes", "y"}
-
-
 def _text(value: object) -> str:
     return "" if value is None else str(value)
+
+
+def _series_text(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame:
+        return pd.Series([""] * len(frame), index=frame.index, dtype="string")
+    return frame[column].fillna("").astype(str)
+
+
+def _normalize_text_series(series: pd.Series) -> pd.Series:
+    return (
+        series.str.lower()
+        .str.replace(r"[^a-z0-9\.\s]", " ", regex=True)
+        .str.split()
+        .str.join(" ")
+    )
+
+
+def _normalize_brand_series(series: pd.Series) -> pd.Series:
+    return series.str.lower().str.strip().str.split().str.join(" ")
+
+
+def _core_tokens_from_normalized(normalized_name: str) -> list[str]:
+    return [
+        token
+        for token in normalized_name.split()
+        if token not in STOPWORDS and token not in ATTRIBUTE_KEYWORDS and token not in FORM_KEYWORDS
+    ]
 
 
 def _category_path(row: dict[str, str], item_info: dict) -> list[str]:
@@ -52,16 +75,6 @@ def _category_path(row: dict[str, str], item_info: dict) -> list[str]:
         if value and value not in path:
             path.append(value)
     return path
-
-
-def _is_private_label(row: dict[str, str], brand_norm: str) -> bool:
-    tags = normalize_name(row.get("tags", ""))
-    return (
-        _parse_boolish(row.get("is_private_label", ""))
-        or brand_norm in PRIVATE_LABEL_BRANDS
-        or "wegmans_brand" in row.get("tags", "")
-        or "wegmans brand" in tags
-    )
 
 
 PRODUCT_DETAIL_FIELDS = [
@@ -162,29 +175,66 @@ def write_detailed_submission_csv(
     write_matches_csv(path, filtered_decisions, products_a_by_id, products_b_by_id)
 
 
-def dataframe_to_products(rows: list[dict[str, str]]) -> list[ProductRecord]:
+def dataframe_to_products(rows: list[dict[str, str]] | pd.DataFrame) -> list[ProductRecord]:
+    if isinstance(rows, pd.DataFrame):
+        frame = rows
+    else:
+        frame = pd.DataFrame.from_records(rows)
+    if frame.empty:
+        return []
+
+    brand_raw_values = _series_text(frame, "brand_raw")
+    brand_norm_values = _normalize_brand_series(brand_raw_values)
+    name_values = _series_text(frame, "name")
+    normalized_name_values = _normalize_text_series(name_values)
+    tags_values = _series_text(frame, "tags")
+    normalized_tags_values = _normalize_text_series(tags_values)
+    private_label_values = (
+        _series_text(frame, "is_private_label").str.strip().str.lower().isin({"1", "true", "t", "yes", "y"})
+        | brand_norm_values.isin(PRIVATE_LABEL_BRANDS)
+        | tags_values.str.contains("wegmans_brand", regex=False)
+        | normalized_tags_values.str.contains("wegmans brand", regex=False)
+    )
+    name_clean_values = _series_text(frame, "name_clean")
+    description_values = _series_text(frame, "description")
+    is_organic_values = _series_text(frame, "is_organic")
+    size_raw_values = _series_text(frame, "size_raw")
+    combined_base_values = (
+        name_values
+        + " "
+        + name_clean_values
+        + " "
+        + description_values
+        + " "
+        + tags_values
+        + " "
+        + is_organic_values
+    )
+    tokens_full_values = [value.split() for value in normalized_name_values]
+    tokens_core_values = [_core_tokens_from_normalized(value) for value in normalized_name_values]
+    brand_raw_list = brand_raw_values.tolist()
+    brand_norm_list = brand_norm_values.tolist()
+    private_label_list = private_label_values.tolist()
+    combined_base_list = combined_base_values.tolist()
+    size_raw_list = size_raw_values.tolist()
+    columns = list(frame.columns)
     products = []
-    for row in rows:
-        brand_raw = row.get("brand_raw", "") or ""
-        brand_norm = normalize_brand(brand_raw)
+    for index, values in enumerate(frame.itertuples(index=False, name=None)):
+        row = dict(zip(columns, values))
+        brand_raw = brand_raw_list[index]
+        brand_norm = brand_norm_list[index]
         sizing = parse_sizing_comp(row.get("sizing_comp", ""))
         item_info_raw = row.get("item_info", "")
         item_info = parse_sizing_comp(item_info_raw)
         combined_text = " ".join(
             [
-                _text(row.get("name", "")),
-                _text(row.get("name_clean", "")),
-                _text(row.get("description", "")),
-                _text(row.get("tags", "")),
-                _text(row.get("is_organic", "")),
+                combined_base_list[index],
                 _text(item_info.get("storage_type", "")),
                 _text(item_info.get("packaging_description", "")),
             ]
         )
-        size_text = _text(sizing.get("size_user_friendly", "")) or _text(row.get("size_raw", ""))
-        size_value, size_unit = extract_size(
-            size_text
-        )
+        size_text = _text(sizing.get("size_user_friendly", "")) or size_raw_list[index]
+        size_value, size_unit = extract_size(size_text)
         global_ids, global_id_flags = extract_global_ids(row, item_info)
         source_ids, source_id_flags = extract_source_ids(row, item_info)
         url = row.get("url", "")
@@ -197,15 +247,15 @@ def dataframe_to_products(rows: list[dict[str, str]]) -> list[ProductRecord]:
                 brand_norm=brand_norm,
                 description=row.get("description", ""),
                 category_path=_category_path(row, item_info),
-                private_label_flag=_is_private_label(row, brand_norm),
+                private_label_flag=bool(private_label_list[index]),
                 size_value=size_value,
                 size_unit=size_unit,
                 pack_count=extract_pack_count(
                     " ".join([_text(row.get("name", "")), size_text, _text(row.get("size_raw", ""))])
                 ),
                 form_flags=extract_form_flags(combined_text),
-                tokens_core=extract_core_tokens(row["name"]),
-                tokens_full=normalize_name(row["name"]).split(),
+                tokens_core=tokens_core_values[index],
+                tokens_full=tokens_full_values[index],
                 attribute_flags=extract_attribute_flags(combined_text),
                 global_ids=global_ids,
                 source_product_id=source_ids.get("url_product_id", extract_source_product_id(url)),
