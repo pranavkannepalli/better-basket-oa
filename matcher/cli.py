@@ -47,10 +47,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm", dest="llm_enabled", action="store_true", default=True)
     parser.add_argument("--no-llm", dest="llm_enabled", action="store_false")
     parser.add_argument("--max-workers", type=int, default=settings.max_workers)
-    parser.add_argument("--worker-mode", choices=["thread", "process"], default="thread")
-    parser.add_argument("--process-start-method", choices=["auto", "fork", "spawn"], default="auto")
+    parser.add_argument("--worker-mode", choices=["thread", "process"], default=settings.worker_mode)
+    parser.add_argument(
+        "--process-start-method",
+        choices=["auto", "fork", "spawn"],
+        default=settings.process_start_method,
+    )
     parser.add_argument("--item-retry-attempts", type=int, default=settings.item_retry_attempts)
-    parser.add_argument("--checkpoint-every", type=int, default=100)
+    parser.add_argument("--checkpoint-every", type=int, default=settings.checkpoint_every)
     parser.add_argument("--retrieval-k", type=int, default=settings.retrieval_k)
     parser.add_argument("--llm-top-n", type=int, default=settings.llm_top_n)
     parser.add_argument("--llm-min-deterministic", type=float, default=settings.llm_min_deterministic)
@@ -138,6 +142,13 @@ class CheckpointCsvWriter:
             self.min_confidence,
         )
         append_matches_csv(self.decisions_path, new_decisions(), products_a_by_id, products_b_by_id)
+        _write_outputs_atomic(
+            self.output_dir,
+            decisions,
+            products_a_by_id,
+            products_b_by_id,
+            self.min_confidence,
+        )
         for position, decision in enumerate(decisions):
             if decision is not None:
                 self.written_positions.add(position)
@@ -153,6 +164,11 @@ class CheckpointCsvWriter:
             self.products_b_by_id,
             self.min_confidence,
         )
+        self.purge()
+
+    def purge(self) -> None:
+        for path in (self.decisions_path, self.submission_path, self.detailed_path):
+            path.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:

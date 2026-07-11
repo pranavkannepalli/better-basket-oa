@@ -1,4 +1,5 @@
 import os
+import platform
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -24,10 +25,16 @@ class Settings(BaseModel):
     retrieval_k: int = int(os.environ.get("RETRIEVAL_K", "30"))
     llm_top_n: int = int(os.environ.get("LLM_TOP_N", "8"))
     llm_min_deterministic: float = float(os.environ.get("LLM_MIN_DETERMINISTIC", "0.40"))
-    llm_backlog_limit: int = int(os.environ.get("LLM_BACKLOG_LIMIT", "0"))
-    llm_workers: int = int(os.environ.get("LLM_WORKERS", "0"))
-    max_workers: int = int(os.environ.get("MAX_WORKERS", "2"))
+    llm_backlog_limit: int = int(os.environ.get("LLM_BACKLOG_LIMIT", "2048"))
+    llm_workers: int = int(os.environ.get("LLM_WORKERS", "64"))
+    max_workers: int = int(os.environ.get("MAX_WORKERS", "8"))
+    worker_mode: str = os.environ.get("WORKER_MODE", "process")
+    process_start_method: str = os.environ.get(
+        "PROCESS_START_METHOD",
+        "spawn" if platform.system() == "Darwin" else "fork",
+    )
     item_retry_attempts: int = int(os.environ.get("ITEM_RETRY_ATTEMPTS", "2"))
-    min_confidence: float = float(os.environ.get("MIN_CONFIDENCE", "0.62"))
+    checkpoint_every: int = int(os.environ.get("CHECKPOINT_EVERY", "1000"))
+    min_confidence: float = float(os.environ.get("MIN_CONFIDENCE", "0.70"))
     high_quality_threshold: float = float(os.environ.get("HIGH_QUALITY_THRESHOLD", "0.72"))
     medium_quality_threshold: float = float(os.environ.get("MEDIUM_QUALITY_THRESHOLD", "0.40"))

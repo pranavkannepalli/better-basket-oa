@@ -364,10 +364,10 @@ def run_pipeline(
     embedding_model: str = _settings.embedding_model,
     embedding_batch_size: int = _settings.embedding_batch_size,
     max_workers: int = _settings.max_workers,
-    worker_mode: str = "thread",
-    process_start_method: str = "auto",
+    worker_mode: str = _settings.worker_mode,
+    process_start_method: str = _settings.process_start_method,
     item_retry_attempts: int = _settings.item_retry_attempts,
-    checkpoint_every: int = 100,
+    checkpoint_every: int = _settings.checkpoint_every,
     progress_callback: Callable[
         [list[MatchDecision | None], dict[str, ProductRecord], dict[str, ProductRecord]], None
     ]
