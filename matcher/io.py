@@ -212,13 +212,17 @@ def append_submission_csv(path: Path, decisions, min_confidence: float = 0.4) ->
 
 def write_detailed_submission_csv(
     path: Path,
-    decisions: list[MatchDecision],
+    decisions,
     products_a_by_id: dict[str, ProductRecord],
     products_b_by_id: dict[str, ProductRecord],
     min_confidence: float = 0.4,
 ) -> None:
-    filtered_decisions = [decision for decision in decisions if decision.confidence >= min_confidence]
-    write_matches_csv(path, filtered_decisions, products_a_by_id, products_b_by_id)
+    write_matches_csv(
+        path,
+        (decision for decision in decisions if decision.confidence >= min_confidence),
+        products_a_by_id,
+        products_b_by_id,
+    )
 
 
 def append_detailed_submission_csv(

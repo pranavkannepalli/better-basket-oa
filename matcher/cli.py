@@ -84,41 +84,71 @@ def _write_outputs_atomic(
     products_b_by_id,
     min_confidence: float,
 ) -> None:
-    completed_decisions = [decision for decision in decisions if decision is not None]
+    def completed_decisions():
+        return (decision for decision in decisions if decision is not None)
+
     tmp_submission_path = output_dir / "matches.csv.tmp"
     tmp_detailed_submission_path = output_dir / "matches_detailed.csv.tmp"
     tmp_decisions_path = output_dir / "match_decisions.csv.tmp"
-    write_submission_csv(tmp_submission_path, completed_decisions, min_confidence=min_confidence)
+    write_submission_csv(tmp_submission_path, completed_decisions(), min_confidence=min_confidence)
     write_detailed_submission_csv(
         tmp_detailed_submission_path,
-        completed_decisions,
+        completed_decisions(),
         products_a_by_id,
         products_b_by_id,
         min_confidence=min_confidence,
     )
-    write_matches_csv(tmp_decisions_path, completed_decisions, products_a_by_id, products_b_by_id)
+    write_matches_csv(tmp_decisions_path, completed_decisions(), products_a_by_id, products_b_by_id)
     tmp_submission_path.replace(output_dir / "matches.csv")
     tmp_detailed_submission_path.replace(output_dir / "matches_detailed.csv")
     tmp_decisions_path.replace(output_dir / "match_decisions.csv")
 
 
-class CheckpointCsvWriter:
+class IncrementalCsvWriter:
     def __init__(self, output_dir: Path, min_confidence: float) -> None:
         self.output_dir = output_dir
         self.min_confidence = min_confidence
         self.written_positions: set[int] = set()
         self.products_a_by_id = None
         self.products_b_by_id = None
-        self.decisions_path = output_dir / "checkpoint_match_decisions.csv"
-        self.submission_path = output_dir / "checkpoint_matches.csv"
-        self.detailed_path = output_dir / "checkpoint_matches_detailed.csv"
+        self.decisions_path = output_dir / "match_decisions.csv"
+        self.submission_path = output_dir / "matches.csv"
+        self.detailed_path = output_dir / "matches_detailed.csv"
         self.written_item_ids_a = self._load_written_item_ids()
+        self.purge_legacy_checkpoints()
+        self.repair_outputs_from_decisions()
 
     def _load_written_item_ids(self) -> set[str]:
         if not self.decisions_path.exists():
             return set()
         with self.decisions_path.open(newline="", encoding="utf-8") as handle:
             return {row["item_id_a"] for row in csv.DictReader(handle) if row.get("item_id_a")}
+
+    def repair_outputs_from_decisions(self) -> None:
+        if not self.decisions_path.exists() or not self.written_item_ids_a:
+            return
+        with self.decisions_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = reader.fieldnames or []
+            rows = [row for row in reader if row.get("item_id_a")]
+
+        tmp_submission_path = self.submission_path.with_suffix(f"{self.submission_path.suffix}.tmp")
+        with tmp_submission_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["item_id_A", "item_id_B"])
+            writer.writeheader()
+            for row in rows:
+                if float(row["confidence"]) >= self.min_confidence:
+                    writer.writerow({"item_id_A": row["item_id_a"], "item_id_B": row["item_id_b"]})
+        tmp_submission_path.replace(self.submission_path)
+
+        tmp_detailed_path = self.detailed_path.with_suffix(f"{self.detailed_path.suffix}.tmp")
+        with tmp_detailed_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                if float(row["confidence"]) >= self.min_confidence:
+                    writer.writerow(row)
+        tmp_detailed_path.replace(self.detailed_path)
 
     def write_new(self, decisions, products_a_by_id, products_b_by_id) -> None:
         self.products_a_by_id = products_a_by_id
@@ -142,13 +172,6 @@ class CheckpointCsvWriter:
             self.min_confidence,
         )
         append_matches_csv(self.decisions_path, new_decisions(), products_a_by_id, products_b_by_id)
-        _write_outputs_atomic(
-            self.output_dir,
-            decisions,
-            products_a_by_id,
-            products_b_by_id,
-            self.min_confidence,
-        )
         for position, decision in enumerate(decisions):
             if decision is not None:
                 self.written_positions.add(position)
@@ -164,10 +187,14 @@ class CheckpointCsvWriter:
             self.products_b_by_id,
             self.min_confidence,
         )
-        self.purge()
+        self.purge_legacy_checkpoints()
 
-    def purge(self) -> None:
-        for path in (self.decisions_path, self.submission_path, self.detailed_path):
+    def purge_legacy_checkpoints(self) -> None:
+        for path in (
+            self.output_dir / "checkpoint_match_decisions.csv",
+            self.output_dir / "checkpoint_matches.csv",
+            self.output_dir / "checkpoint_matches_detailed.csv",
+        ):
             path.unlink(missing_ok=True)
 
 
@@ -180,8 +207,8 @@ def main(argv: list[str] | None = None) -> int:
         with redirect_stdout(Tee(sys.stdout, log_file)), redirect_stderr(Tee(sys.stderr, log_file)):
             print(f"Writing outputs to {output_dir}")
             started = time.perf_counter()
-            checkpoint_csv_writer = CheckpointCsvWriter(output_dir, args.min_confidence)
-            progress_callback = checkpoint_csv_writer.write_new
+            incremental_csv_writer = IncrementalCsvWriter(output_dir, args.min_confidence)
+            progress_callback = incremental_csv_writer.write_new
             decisions = run_pipeline(
                 _load_catalog_frame(args.input_a, args.limit_a),
                 _load_catalog_frame(args.input_b),
@@ -203,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
             print("Writing final CSV outputs")
-            checkpoint_csv_writer.write_final(decisions)
+            incremental_csv_writer.write_final(decisions)
             print(summarize_decisions(decisions))
             print(f"Run finished in {time.perf_counter() - started:.1f}s")
     return 0
